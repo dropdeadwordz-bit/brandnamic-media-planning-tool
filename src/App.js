@@ -1,9 +1,35 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy } from 'lucide-react';
+import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+
+// --- FIREBASE INITIALISIERUNG ---
+let firebaseConfig = {};
+if (typeof __firebase_config !== 'undefined') {
+  firebaseConfig = JSON.parse(__firebase_config);
+} else {
+  // 🔴🔴🔴 HIER DEINE FIREBASE DATEN EINTRAGEN 🔴🔴🔴
+  // Ersetze die Platzhalter in den Anführungszeichen durch deine Daten aus der Firebase Console
+  firebaseConfig = {
+  apiKey: "AIzaSyBL9f_kigv3UYrLwq59hGj2VI7wV0G9-LU",
+  authDomain: "brandnamic-media-planning-tool.firebaseapp.com",
+  projectId: "brandnamic-media-planning-tool",
+  storageBucket: "brandnamic-media-planning-tool.firebasestorage.app",
+  messagingSenderId: "577187396851",
+  appId: "1:577187396851:web:e05df3908fb9431d91cb86"
+  };
+  // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
+}
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'media-planner-v1';
 
 // --- HILFSFUNKTIONEN ---
 const formatCurrency = (value) => {
-  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(value || 0);
+  // Zeigt jetzt bis zu 2 Kommastellen (Cent) an, wenn vorhanden, für absolute Präzision
+  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value || 0);
 };
 
 const formatDateStr = (dateStr) => {
@@ -36,11 +62,11 @@ const fetchWithBackoff = async (url, options, maxRetries = 5) => {
     try {
       const response = await fetch(url, options);
       if (!response.ok) {
+        const errText = await response.text();
         if (response.status === 403 || response.status === 400) {
-           const errText = await response.text();
            throw new Error(`Client Error ${response.status}: ${errText}`);
         }
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
       }
       return await response.json();
     } catch (e) {
@@ -71,11 +97,48 @@ export default function App() {
   const [campaigns, setCampaigns] = useState(generateInitialState());
   const [targetBudget, setTargetBudget] = useState(0); 
   
-  // --- PROJEKT SPEICHER ---
+  // --- PROJEKT SPEICHER (Cloud Firestore) ---
   const [savedProjects, setSavedProjects] = useState([]);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+  const [user, setUser] = useState(null);
+
+  // 1. Authentifizierung bei Cloud-Verbindung
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth Error:", error);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Projekte in Echtzeit aus der Cloud laden
+  useEffect(() => {
+    if (!user) return;
+    const projectsRef = collection(db, 'artifacts', appId, 'public', 'data', 'projects');
+    const unsubscribe = onSnapshot(projectsRef, (snapshot) => {
+      const loadedProjects = [];
+      snapshot.forEach((document) => {
+        loadedProjects.push({ id: document.id, ...document.data() });
+      });
+      loadedProjects.sort((a, b) => b.createdAt - a.createdAt);
+      setSavedProjects(loadedProjects);
+    }, (error) => {
+      console.error("Firestore Error:", error);
+    });
+    return () => unsubscribe();
+  }, [user]);
 
   // --- UI STATE ---
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [rebalanceLog, setRebalanceLog] = useState(null);
   const [chatInput, setChatInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -149,10 +212,15 @@ export default function App() {
         });
       });
     }
+    
+    // Auf Cent runden, um JS Floating-Point-Probleme (z.B. 40.000,000001) zu vermeiden
+    grandTotal = Math.round(grandTotal * 100) / 100;
+    
     return { monthlyTotals, grandTotal };
   }, [campaigns, generatedMonths, plannerStart, plannerEnd, isInvalidDateRange]);
 
-  const budgetExceededBy = totals.grandTotal - targetBudget;
+  // Auf Cent genauer Check
+  const budgetExceededBy = Math.round((totals.grandTotal - targetBudget) * 100) / 100;
 
   // --- MARKT-VERTEILUNG ---
   const marketShares = useMemo(() => {
@@ -178,19 +246,32 @@ export default function App() {
       .sort((a, b) => b.amount - a.amount);
   }, [campaigns, generatedMonths, plannerStart, plannerEnd, totals.grandTotal]);
 
-  // --- PROJEKT HANDLER ---
-  const handleSaveProject = () => {
-    const snapshot = {
-      id: Date.now().toString(),
+  // --- PROJEKT HANDLER (Cloud) ---
+  const handleSaveProject = async () => {
+    if (!user) {
+      setRebalanceLog(["Fehler: Keine Datenbank-Verbindung (User nicht authentifiziert)."]);
+      return;
+    }
+    
+    const projectId = Date.now().toString();
+    const projectData = {
       timestamp: new Date().toLocaleString('de-DE', { hour12: false }),
+      createdAt: Date.now(),
       clientName: clientName || 'Unbenannter Kunde',
       plannerStart,
       plannerEnd,
       targetBudget,
       campaigns: JSON.parse(JSON.stringify(campaigns))
     };
-    setSavedProjects(prev => [snapshot, ...prev]);
-    setRebalanceLog(["Version/Projekt wurde erfolgreich im Zwischenspeicher gesichert."]);
+    
+    try {
+      const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', projectId);
+      await setDoc(projectRef, projectData);
+      setRebalanceLog(["Projekt wurde erfolgreich in der Cloud gesichert und kann geteilt werden!"]);
+    } catch (error) {
+      console.error("Speicherfehler:", error);
+      setRebalanceLog(["Fehler beim Speichern in der Cloud."]);
+    }
   };
 
   const handleLoadProject = (project) => {
@@ -200,18 +281,28 @@ export default function App() {
     setTargetBudget(project.targetBudget);
     setCampaigns(project.campaigns);
     setIsProjectModalOpen(false);
-    setRebalanceLog(["Projekt erfolgreich geladen."]);
+    setRebalanceLog(["Projekt erfolgreich aus der Cloud geladen."]);
+  };
+
+  const handleDeleteProject = async (id) => {
+    if (!user) return;
+    try {
+      const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', id);
+      await deleteDoc(projectRef);
+    } catch (error) {
+      console.error("Löschfehler:", error);
+    }
   };
 
   // --- KAMPAGNEN HANDLER ---
   const handleDailyBudgetChange = (campId, monthKey, value) => {
-    const numValue = parseInt(value, 10);
+    const strVal = value.replace(/[^\d.,]/g, '').replace(',', '.');
+    const numValue = parseFloat(strVal);
     const validValue = isNaN(numValue) || numValue < 0 ? 0 : numValue;
     setCampaigns(prev => prev.map(c => c.id === campId ? { ...c, budgets: { ...c.budgets, [monthKey]: validValue } } : c));
     setRebalanceLog(null);
   };
 
-  // Bidirektionaler Budget-Handler (Setzt ein einheitliches Tagesbudget für alle aktiven Monate)
   const handleCampaignTbChange = (campId, value) => {
     const strVal = value.replace(/[^\d.,]/g, '').replace(',', '.'); 
     if (strVal === '') {
@@ -223,7 +314,6 @@ export default function App() {
     
     setCampaigns(prev => prev.map(c => {
       if (c.id !== campId) return c;
-      
       const campStartStr = c.startDate || plannerStart;
       const campEndStr = c.endDate || plannerEnd;
       const newBudgets = { ...c.budgets };
@@ -233,7 +323,6 @@ export default function App() {
             newBudgets[m.key] = newTb;
          }
       });
-      
       return { ...c, budgets: newBudgets };
     }));
     setRebalanceLog(null);
@@ -261,17 +350,14 @@ export default function App() {
   const handleDuplicateCampaign = (campId) => {
     const campToCopy = campaigns.find(c => c.id === campId);
     if (!campToCopy) return;
-    
     const newCamp = {
       ...JSON.parse(JSON.stringify(campToCopy)), 
       id: crypto.randomUUID(),
       name: `${campToCopy.name} (Boost)`
     };
-    
     const index = campaigns.findIndex(c => c.id === campId);
     const newCampaigns = [...campaigns];
     newCampaigns.splice(index + 1, 0, newCamp);
-    
     setCampaigns(newCampaigns);
     setRebalanceLog(null);
   };
@@ -283,8 +369,8 @@ export default function App() {
 
   const getWidthClass = (val) => {
     const len = String(val).length;
-    if (len >= 4) return 'w-16'; 
-    if (len === 3) return 'w-12'; 
+    if (len >= 5) return 'w-16'; 
+    if (len >= 3) return 'w-12'; 
     return 'w-10'; 
   };
 
@@ -297,7 +383,10 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
+      // 🔴🔴🔴 HIER DEINEN GEMINI API KEY EINTRAGEN 🔴🔴🔴
       const apiKey = "AIzaSyCVLNFNK9YFLfVWGWr0xXR86jZUPT430r8"; 
+      // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
+      
       if (!apiKey) throw new Error("MISSING_API_KEY");
 
       const systemPrompt = `
@@ -330,7 +419,7 @@ export default function App() {
       };
 
       const data = await fetchWithBackoff(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:generateContent?key=${apiKey}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
       );
 
@@ -343,13 +432,14 @@ export default function App() {
       setChatHistory(prev => [...prev, { role: 'ai', text: result.reply }]);
 
     } catch (error) {
-      let errorMsg = 'Fehler bei der Datenverarbeitung.';
+      console.error("AI Assistant Error Details:", error);
+      let errorMsg = `Fehler: ${error.message}`;
       if (error.message === "MISSING_API_KEY") {
-         errorMsg = '⚠️ System-Info: Bitte hinterlege einen API-Key im Quellcode (`const apiKey`), um den KI-Assistenten zu nutzen.';
+         errorMsg = '⚠️ System-Info: Bitte hinterlege deinen API-Key im Quellcode (`const apiKey`), um den KI-Assistenten zu nutzen.';
       } else if (error.message.includes('403')) {
-         errorMsg = 'Zugriff verweigert (Fehler 403). Der hinterlegte API-Schlüssel ist nicht autorisiert.';
+         errorMsg = `Zugriff verweigert (Fehler 403). Der API-Schlüssel ist ungültig oder das Modell ist für diesen Key gesperrt. Details: ${error.message}`;
       } else if (error.message.includes('400')) {
-         errorMsg = 'Ungültige Anfrage (Fehler 400).';
+         errorMsg = `Ungültige Anfrage (Fehler 400). Details: ${error.message}`;
       }
       setChatHistory(prev => [...prev, { role: 'error', text: errorMsg }]);
     } finally {
@@ -361,30 +451,18 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory, isAiLoading]);
 
-  // --- UMVERTEILUNGS-ALGORITHMUS (100% EXAKT) ---
+  // --- UMVERTEILUNGS-ALGORITHMUS ---
   const performRebalance = (mode) => { 
     if (isInvalidDateRange) return;
-    const diff = totals.grandTotal - targetBudget;
+    const diff = budgetExceededBy; 
     
     if (mode === 'cut' && diff <= 0) return;
     if (mode === 'fill' && diff >= 0) return;
 
     let updatedCampaigns = JSON.parse(JSON.stringify(campaigns));
     
-    const calcNewTotal = (camps) => {
-      let t = 0;
-      camps.forEach(c => {
-        const cStart = c.startDate || plannerStart;
-        const cEnd = c.endDate || plannerEnd;
-        generatedMonths.forEach(m => {
-           const d = getDaysOverlap(cStart, cEnd, m.actualStartStr, m.actualEndStr);
-           t += (c.budgets[m.key] || 0) * d;
-        });
-      });
-      return t;
-    };
-
-    let targetChange = Math.abs(diff);
+    let futureTotal = 0;
+    let totalFutureActiveDays = 0;
     let slots = [];
     
     updatedCampaigns.forEach((c, cIdx) => {
@@ -394,7 +472,10 @@ export default function App() {
         if (m.actualEndStr >= referenceDate) {
            const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
            if (cDays > 0) {
-             slots.push({ cIdx, mKey: m.key, activeDays: cDays, currentTb: (c.budgets[m.key] || 0) });
+             const tb = c.budgets[m.key] || 0;
+             futureTotal += (tb * cDays);
+             totalFutureActiveDays += cDays;
+             slots.push({ cIdx, mKey: m.key, activeDays: cDays, currentTb: tb });
            }
         }
       });
@@ -405,81 +486,52 @@ export default function App() {
       return;
     }
 
-    if (mode === 'cut') {
-       let remainingCut = targetChange;
-       
-       let it1 = 0;
-       while (remainingCut > 0.5 && it1 < 50) {
-          let activeSlots = slots.filter(s => s.currentTb > 10);
-          if (activeSlots.length === 0) break;
-          let weightSum = activeSlots.reduce((sum, s) => sum + ((s.currentTb - 10) * s.activeDays), 0);
-          if (weightSum <= 0) break;
+    let newFutureTotal = futureTotal - diff; 
 
-          let cutRound = 0;
-          activeSlots.forEach(s => {
-             let dailyCut = (remainingCut * (((s.currentTb - 10) * s.activeDays) / weightSum)) / s.activeDays;
-             let actual = Math.min(dailyCut, s.currentTb - 10);
-             s.currentTb -= actual;
-             cutRound += actual * s.activeDays;
-          });
-          remainingCut -= cutRound;
-          it1++;
-       }
-
-       let it2 = 0;
-       while (remainingCut > 0.5 && it2 < 50) {
-          let activeSlots = slots.filter(s => s.currentTb > 0);
-          if (activeSlots.length === 0) break;
-          let weightSum = activeSlots.reduce((sum, s) => sum + (s.currentTb * s.activeDays), 0);
-          if (weightSum <= 0) break;
-
-          let cutRound = 0;
-          activeSlots.forEach(s => {
-             let dailyCut = (remainingCut * ((s.currentTb * s.activeDays) / weightSum)) / s.activeDays;
-             let actual = Math.min(dailyCut, s.currentTb);
-             s.currentTb -= actual;
-             cutRound += actual * s.activeDays;
-          });
-          remainingCut -= cutRound;
-          it2++;
-       }
-
-       slots.forEach(s => updatedCampaigns[s.cIdx].budgets[s.mKey] = Math.floor(s.currentTb));
-    } 
-    
-    if (mode === 'fill') {
-       let remainingFill = targetChange;
-       let it = 0;
-       while (remainingFill > 0.5 && it < 50) {
-          if (slots.length === 0) break;
-          let weightSum = slots.reduce((sum, s) => sum + (s.currentTb > 0 ? s.currentTb * s.activeDays : s.activeDays), 0);
-          if (weightSum <= 0) break;
-
-          let fillRound = 0;
+    if (newFutureTotal <= 0) {
+       slots.forEach(s => {
+          updatedCampaigns[s.cIdx].budgets[s.mKey] = 0;
+       });
+    } else {
+       if (futureTotal > 0) {
+          let scale = newFutureTotal / futureTotal;
           slots.forEach(s => {
-             let w = s.currentTb > 0 ? s.currentTb * s.activeDays : s.activeDays;
-             let dailyFill = (remainingFill * (w / weightSum)) / s.activeDays;
-             s.currentTb += dailyFill;
-             fillRound += dailyFill * s.activeDays;
+             updatedCampaigns[s.cIdx].budgets[s.mKey] = Math.floor(s.currentTb * scale * 100) / 100;
           });
-          remainingFill -= fillRound;
-          it++;
+       } else {
+          let daily = newFutureTotal / totalFutureActiveDays;
+          slots.forEach(s => {
+             updatedCampaigns[s.cIdx].budgets[s.mKey] = Math.floor(daily * 100) / 100;
+          });
        }
-       slots.forEach(s => updatedCampaigns[s.cIdx].budgets[s.mKey] = Math.floor(s.currentTb));
     }
 
-    let finalTotal = calcNewTotal(updatedCampaigns);
-    let gap = targetBudget - finalTotal;
+    let calcNewTotal = () => {
+       let t = 0;
+       updatedCampaigns.forEach(c => {
+          const cStart = c.startDate || plannerStart;
+          const cEnd = c.endDate || plannerEnd;
+          generatedMonths.forEach(m => {
+             const d = getDaysOverlap(cStart, cEnd, m.actualStartStr, m.actualEndStr);
+             t += (c.budgets[m.key] || 0) * d;
+          });
+       });
+       return Math.round(t * 100) / 100;
+    };
+
+    let currentTot = calcNewTotal();
+    let gap = Math.round((targetBudget - currentTot) * 100) / 100; 
 
     if (gap > 0) {
        slots.sort((a, b) => b.activeDays - a.activeDays);
        let added = true;
        while (gap > 0 && added && slots.length > 0) {
           added = false;
-          for (let i=0; i < slots.length; i++) {
-             if (gap >= slots[i].activeDays) {
-                updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] += 1;
-                gap -= slots[i].activeDays;
+          for (let i = 0; i < slots.length; i++) {
+             let cost = Math.round(0.01 * slots[i].activeDays * 100) / 100;
+             if (gap >= cost) {
+                updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] = Math.round((updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] + 0.01) * 100) / 100;
+                gap = Math.round((gap - cost) * 100) / 100;
                 added = true;
              }
           }
@@ -489,10 +541,11 @@ export default function App() {
        let subtracted = true;
        while (gap < 0 && subtracted && slots.length > 0) {
           subtracted = false;
-          for (let i=0; i < slots.length; i++) {
+          for (let i = 0; i < slots.length; i++) {
              if (updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] > 0) {
-                updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] -= 1;
-                gap += slots[i].activeDays;
+                let cost = Math.round(0.01 * slots[i].activeDays * 100) / 100;
+                updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] = Math.round((updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] - 0.01) * 100) / 100;
+                gap = Math.round((gap + cost) * 100) / 100;
                 subtracted = true;
                 break;
              }
@@ -503,75 +556,62 @@ export default function App() {
     setCampaigns(updatedCampaigns);
     setRebalanceLog([
       mode === 'cut' 
-        ? `Budget erfolgreich auf Vorgabe gekürzt. (Abweichung zum Ziel: ${formatCurrency(Math.abs(gap))} €)`
-        : `Restbudget erfolgreich verteilt. (Abweichung zum Ziel: ${formatCurrency(Math.abs(gap))} €)`
+        ? `Budget erfolgreich auf Vorgabe gekürzt. (Abweichung: ${formatCurrency(Math.abs(gap))})`
+        : `Restbudget erfolgreich verteilt. (Abweichung: ${formatCurrency(Math.abs(gap))})`
     ]);
   };
 
-  const totalColumns = 8 + generatedMonths.length; // Markt + Kampagne + Gesamt + Start + Ende + Reset + Months + TOT + Trash
+  const totalColumns = 8 + generatedMonths.length;
 
   return (
-    <div className="min-h-screen bg-white text-black p-4 md:p-6 font-sans">
-      <div className="max-w-[1900px] mx-auto space-y-8">
+    <div className="min-h-screen bg-[#f8fafc] text-gray-900 p-3 sm:p-6 font-sans selection:bg-black selection:text-white">
+      <div className="max-w-[1900px] mx-auto space-y-6">
         
         {/* --- HEADER --- */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 sm:p-6 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-5">
           <div className="flex items-center gap-4">
-            <div className="relative h-12 flex items-center">
-               <img src="image_3db660.png" alt="Brandnamic" className="h-full object-contain mr-3 filter grayscale" onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'block'; }} />
-               <span style={{display: 'none'}} className="text-3xl font-black tracking-tighter text-black">brandnamic</span>
+            <div className="relative h-10 sm:h-12 flex items-center">
+               <img src="image_3db660.png" alt="Brandnamic" className="h-full object-contain filter grayscale" onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'block'; }} />
+               <span style={{display: 'none'}} className="text-2xl sm:text-3xl font-black tracking-tighter text-black">brandnamic</span>
             </div>
-            <div className="h-10 w-px bg-gray-300 mx-2 hidden md:block"></div>
+            <div className="h-10 w-px bg-gray-200 mx-1 hidden md:block"></div>
             <div>
-              <h1 className="text-xl font-black flex items-center gap-2 text-black uppercase tracking-wide">
+              <h1 className="text-lg sm:text-xl font-black flex items-center gap-2 text-black uppercase tracking-wide">
                 Media Budget Planner
               </h1>
-              <p className="text-sm text-gray-500">Präzisionsplanung & Dynamische Umverteilung</p>
+              <p className="text-xs sm:text-sm text-gray-500">Präzisionsplanung & Dynamische Umverteilung</p>
             </div>
           </div>
 
-          <div className="flex gap-2">
-            <button onClick={handleSaveProject} className="flex items-center gap-2 px-4 py-2 border-2 border-black bg-white text-black hover:bg-gray-100 font-bold text-sm uppercase tracking-wider transition-colors">
-              <Save size={16} /> Aktuellen Stand Speichern
+          <div className="flex flex-wrap gap-2 sm:gap-3 w-full lg:w-auto">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-black font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors hidden xl:flex">
+              {isSidebarOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />} 
+              <span className="hidden sm:inline">Assistent</span>
             </button>
-            <button onClick={() => setIsProjectModalOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-black text-white hover:bg-gray-800 font-bold text-sm uppercase tracking-wider transition-colors relative">
-              <FolderOpen size={16} /> Projekte & Historie
+            <button onClick={handleSaveProject} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 border border-gray-300 bg-white text-black hover:bg-gray-50 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex">
+              <Save size={18} /> <span className="hidden sm:inline">Speichern</span>
+            </button>
+            <button onClick={() => setIsProjectModalOpen(true)} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-black text-white hover:bg-gray-800 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm relative flex">
+              <FolderOpen size={18} /> <span className="hidden sm:inline">Projekte</span>
               {savedProjects.length > 0 && (
-                <span className="absolute -top-2 -right-2 bg-white text-black border-2 border-black rounded-full w-5 h-5 flex items-center justify-center text-[10px] font-black">{savedProjects.length}</span>
+                <span className="absolute -top-2 -right-2 bg-red-500 text-white shadow-sm border-2 border-white rounded-full w-5 h-5 flex items-center justify-center text-[10px] font-black">{savedProjects.length}</span>
               )}
             </button>
           </div>
         </div>
 
-        {/* --- BRIEFING BOX --- */}
-        <div className="bg-gray-50 p-6 border-2 border-black relative shadow-sm">
-          <h2 className="font-black text-xs uppercase tracking-widest text-black mb-5 border-b-2 border-gray-200 pb-2">
-            Briefing - Eckdaten
-          </h2>
+        {/* --- BRIEFING BOX (Symmetrisches Mobile-Layout) --- */}
+        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-gray-200 relative shadow-sm">
+          <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-3">
+             <Calendar size={16} className="text-black" />
+             <h2 className="font-black text-xs uppercase tracking-widest text-black">Briefing Eckdaten</h2>
+          </div>
           
           <div className="flex flex-col xl:flex-row justify-between gap-8">
-            
-            {/* 2x2 Raster (Grid) */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6 flex-1 max-w-4xl">
+            {/* Symmetrisches Grid für Inputs */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 sm:gap-6 flex-1">
               
-              {/* Oben Links: Zeitraum Start */}
-              <div className="flex flex-col">
-                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
-                  <Calendar size={12} /> Zeitraum Start
-                </label>
-                <input type="date" value={plannerStart} onChange={(e) => setPlannerStart(e.target.value)} className="bg-white border border-gray-300 px-3 py-2 text-sm font-bold outline-none focus:border-black focus:ring-1 focus:ring-black w-full" />
-              </div>
-
-              {/* Oben Rechts: Zeitraum Ende */}
-              <div className="flex flex-col">
-                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
-                  <Calendar size={12} /> Zeitraum Ende
-                </label>
-                <input type="date" value={plannerEnd} onChange={(e) => setPlannerEnd(e.target.value)} className="bg-white border border-gray-300 px-3 py-2 text-sm font-bold outline-none focus:border-black focus:ring-1 focus:ring-black w-full" />
-              </div>
-
-              {/* Unten Links: Kunde */}
-              <div className="flex flex-col">
+              <div className="flex flex-col w-full">
                 <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
                   <User size={12} /> Kunde
                 </label>
@@ -580,14 +620,23 @@ export default function App() {
                   value={clientName} 
                   onChange={(e) => setClientName(e.target.value)} 
                   placeholder="z.B. Sensoria Dolomites"
-                  className="bg-white border border-gray-300 px-3 py-2 text-sm font-bold outline-none focus:border-black focus:ring-1 focus:ring-black w-full" 
+                  className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" 
                 />
               </div>
 
-              {/* Unten Rechts: Gesamtbudget Vorgabe */}
-              <div className="flex flex-col">
+              <div className="flex flex-col w-full">
+                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Zeitraum Start</label>
+                <input type="date" value={plannerStart} onChange={(e) => setPlannerStart(e.target.value)} className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" />
+              </div>
+
+              <div className="flex flex-col w-full">
+                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Zeitraum Ende</label>
+                <input type="date" value={plannerEnd} onChange={(e) => setPlannerEnd(e.target.value)} className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" />
+              </div>
+
+              <div className="flex flex-col w-full">
                 <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">
-                  Gesamtbudget (Vorgabe Kunde)
+                  Gesamtbudget (Kunde)
                 </label>
                 <div className="relative flex items-center">
                   <input 
@@ -595,7 +644,7 @@ export default function App() {
                     value={targetBudget === 0 ? '' : new Intl.NumberFormat('de-DE').format(targetBudget)} 
                     onChange={handleTargetBudgetChange} 
                     placeholder="0"
-                    className="bg-white border-2 border-black pl-3 pr-8 py-2 text-base font-black outline-none focus:bg-gray-100 text-right w-full" 
+                    className="bg-white border-2 border-black pl-3 pr-8 py-2.5 text-sm font-black outline-none focus:ring-2 focus:ring-gray-200 rounded-lg text-right w-full transition-shadow" 
                   />
                   <span className="absolute right-3 text-sm font-black text-gray-500">€</span>
                 </div>
@@ -604,11 +653,11 @@ export default function App() {
             </div>
             
             {/* Live-Total Box */}
-            <div className="flex flex-col xl:pl-8 xl:border-l-2 border-gray-200 justify-center items-start xl:items-end">
-              <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1 text-left xl:text-right">
-                Gesamtbudget laut Tabelle (live)
+            <div className="flex flex-col items-start sm:items-center xl:items-end justify-center pt-5 xl:pt-0 border-t border-gray-100 xl:border-t-0 xl:border-l xl:pl-8">
+              <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1 text-left sm:text-center xl:text-right">
+                Gesamtbudget (Tabelle)
               </label>
-              <div className={`text-4xl font-black mt-1 ${budgetExceededBy > 0 ? 'text-black bg-gray-200 px-2 py-1 inline-block w-max' : 'text-black'}`}>
+              <div className={`text-3xl sm:text-4xl font-black mt-1 rounded-xl px-4 py-2 ${budgetExceededBy > 0 ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-gray-50 text-black border border-gray-200'}`}>
                 {formatCurrency(totals.grandTotal)}
               </div>
             </div>
@@ -618,34 +667,34 @@ export default function App() {
 
         {/* DATUMS-FEHLERMELDUNG */}
         {isInvalidDateRange && (
-          <div className="bg-black text-white p-4 flex items-center gap-3 shadow-md border-l-4 border-red-500">
+          <div className="bg-red-50 text-red-900 p-4 rounded-xl flex items-center gap-3 shadow-sm border border-red-200">
             <AlertCircle className="text-red-500" />
             <div>
               <h3 className="font-black uppercase tracking-wider text-sm">Ungültiger Zeitraum</h3>
-              <p className="text-gray-300 text-sm">Der <strong className="text-white">Start-Zeitraum</strong> darf nicht nach dem <strong className="text-white">End-Zeitraum</strong> liegen. Bitte korrigieren.</p>
+              <p className="text-sm">Der Start-Zeitraum darf nicht nach dem End-Zeitraum liegen. Bitte korrigieren.</p>
             </div>
           </div>
         )}
 
         {!isInvalidDateRange && (
-          <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+          <div className={`grid grid-cols-1 ${isSidebarOpen ? 'xl:grid-cols-4' : 'xl:grid-cols-1'} gap-8 transition-all duration-300`}>
             
             {/* --- MAIN CONTENT --- */}
-            <div className="xl:col-span-3 space-y-6">
+            <div className={`${isSidebarOpen ? 'xl:col-span-3' : 'xl:col-span-4'} space-y-6 min-w-0`}>
               
               {/* ALERTS: OVER BUDGET */}
               {budgetExceededBy > 0 && (
-                <div className="bg-black text-white p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-md">
+                <div className="bg-red-50 border border-red-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
                   <div className="flex items-center gap-3">
-                    <AlertCircle className="text-white" />
+                    <div className="bg-red-100 p-2 rounded-full"><AlertCircle className="text-red-600" size={20} /></div>
                     <div>
-                      <h3 className="font-black uppercase tracking-wider text-sm">Budget überschritten</h3>
-                      <p className="text-gray-300 text-sm">
-                        Dein aktueller Plan ist um <strong className="text-white bg-gray-800 px-1">{formatCurrency(budgetExceededBy)}</strong> höher als das Zielbudget.
+                      <h3 className="font-black uppercase tracking-wider text-sm text-red-900">Budget überschritten</h3>
+                      <p className="text-red-700 text-sm mt-0.5">
+                        Dein aktueller Plan ist um <strong className="bg-white px-1.5 py-0.5 rounded shadow-sm mx-1">{formatCurrency(budgetExceededBy)}</strong> höher als das Zielbudget.
                       </p>
                     </div>
                   </div>
-                  <button onClick={() => performRebalance('cut')} className="bg-white text-black hover:bg-gray-200 px-5 py-2.5 text-sm font-black uppercase tracking-wider flex items-center gap-2 transition-colors whitespace-nowrap">
+                  <button onClick={() => performRebalance('cut')} className="bg-red-600 text-white hover:bg-red-700 px-5 py-2.5 text-sm font-black uppercase tracking-wider rounded-lg flex items-center gap-2 transition-colors whitespace-nowrap shadow-sm">
                     <ArrowRightLeft size={16} /> Automatisch Kürzen
                   </button>
                 </div>
@@ -653,17 +702,17 @@ export default function App() {
 
               {/* ALERTS: UNDER BUDGET (Surplus) */}
               {targetBudget > 0 && budgetExceededBy < 0 && (
-                <div className="bg-gray-50 border-2 border-black p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
+                <div className="bg-green-50 border border-green-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
                   <div className="flex items-center gap-3">
-                    <ArrowUpCircle className="text-black" />
+                    <div className="bg-green-100 p-2 rounded-full"><ArrowUpCircle className="text-green-600" size={20} /></div>
                     <div>
-                      <h3 className="font-black text-black uppercase tracking-wider text-sm">Budget verfügbar</h3>
-                      <p className="text-gray-600 text-sm">
-                        Du hast noch <strong className="text-black font-black">{formatCurrency(Math.abs(budgetExceededBy))}</strong> an ungenutztem Budget frei.
+                      <h3 className="font-black text-green-900 uppercase tracking-wider text-sm">Budget verfügbar</h3>
+                      <p className="text-green-700 text-sm mt-0.5">
+                        Du hast noch <strong className="bg-white px-1.5 py-0.5 rounded shadow-sm mx-1">{formatCurrency(Math.abs(budgetExceededBy))}</strong> an ungenutztem Budget frei.
                       </p>
                     </div>
                   </div>
-                  <button onClick={() => performRebalance('fill')} className="bg-black text-white hover:bg-gray-800 px-5 py-2.5 text-sm font-black uppercase tracking-wider flex items-center gap-2 transition-colors whitespace-nowrap">
+                  <button onClick={() => performRebalance('fill')} className="bg-green-600 text-white hover:bg-green-700 px-5 py-2.5 text-sm font-black uppercase tracking-wider rounded-lg flex items-center gap-2 transition-colors whitespace-nowrap shadow-sm">
                     <ArrowUpCircle size={16} /> Restbudget verteilen
                   </button>
                 </div>
@@ -671,48 +720,48 @@ export default function App() {
 
               {/* ERFOLGSMELDUNG */}
               {rebalanceLog && (
-                <div className="bg-white border-2 border-black p-4 flex items-start gap-3 shadow-sm">
-                  <Info className="text-black mt-0.5" />
+                <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3 shadow-sm">
+                  <Info className="text-blue-600 mt-0.5" size={20} />
                   <div>
-                    <h3 className="text-black font-black uppercase tracking-wider text-sm">Aktion erfolgreich</h3>
-                    {rebalanceLog.map((log, i) => <p key={i} className="text-gray-700 text-sm mt-1 font-medium">{log}</p>)}
+                    <h3 className="text-blue-900 font-black uppercase tracking-wider text-sm">Aktion erfolgreich</h3>
+                    {rebalanceLog.map((log, i) => <p key={i} className="text-blue-700 text-sm mt-1">{log}</p>)}
                   </div>
                 </div>
               )}
 
-              {/* TABELLE */}
-              <div className="bg-white border border-black overflow-hidden flex flex-col shadow-sm">
-                <div className="overflow-x-auto custom-scrollbar pb-4">
+              {/* TABELLE CONTAINER */}
+              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex flex-col shadow-sm">
+                <div className="overflow-x-auto custom-scrollbar pb-2">
                   <table className="w-full text-sm text-left whitespace-nowrap table-auto">
                     
                     {/* HEADER */}
-                    <thead className="bg-gray-100 border-b-2 border-black">
+                    <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
-                        <th className="px-4 py-3 font-black text-black sticky left-0 bg-gray-100 z-30 border-r border-gray-300 shadow-[1px_0_0_black] min-w-[100px] w-[100px] max-w-[100px]">MARKT</th>
-                        <th className="px-4 py-3 font-black text-black sticky left-[100px] bg-gray-100 z-30 border-r border-black min-w-[130px] w-[130px] max-w-[200px]">KAMPAGNE</th>
-                        <th className="px-3 py-3 font-black text-black border-r border-gray-300 text-xs min-w-[120px] w-[120px]">TB (Opt.)</th>
-                        <th className="px-3 py-3 font-black text-black border-r border-gray-300 text-xs min-w-[110px] w-[110px]">START</th>
-                        <th className="px-3 py-3 font-black text-black border-r border-gray-300 text-xs min-w-[110px] w-[110px]">ENDE</th>
-                        <th className="px-1 py-3 border-r border-black text-center min-w-[32px] w-[32px]" title="Auf globalen Zeitraum zurücksetzen"></th>
+                        <th className="px-4 py-4 font-black text-gray-700 sticky left-0 bg-gray-50 z-30 border-r border-gray-200 min-w-[100px] w-[100px]">MARKT</th>
+                        <th className="px-4 py-4 font-black text-gray-700 sticky left-[100px] bg-gray-50 z-30 border-r border-gray-200 min-w-[130px] w-[130px]">KAMPAGNE</th>
+                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-200 text-xs min-w-[120px] w-[120px]">TB (Opt.)</th>
+                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-200 text-xs min-w-[110px] w-[110px]">START</th>
+                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-200 text-xs min-w-[110px] w-[110px]">ENDE</th>
+                        <th className="px-1 py-4 border-r border-gray-200 text-center min-w-[36px] w-[36px]" title="Auf globalen Zeitraum zurücksetzen"></th>
                         {generatedMonths.map((m) => {
                           const isPast = m.actualEndStr < referenceDate;
                           return (
-                            <th key={`head-${m.key}`} className={`px-2 py-2 text-center border-r border-gray-200 min-w-[90px] ${isPast ? 'bg-gray-200 text-gray-500' : 'text-black'}`}>
-                              <div className="text-[10px] font-bold text-gray-400 leading-none mb-1">{m.days} T.</div>
-                              <div className="font-bold">{m.name}</div>
+                            <th key={`head-${m.key}`} className={`px-2 py-3 text-center border-r border-gray-200 min-w-[90px] ${isPast ? 'text-gray-400' : 'text-gray-700'}`}>
+                              <div className="text-[10px] font-bold text-gray-400 leading-none mb-1.5">{m.days} T.</div>
+                              <div className="font-black">{m.name}</div>
                             </th>
                           );
                         })}
-                        <th className="px-4 py-3 font-black text-black text-right bg-gray-200 border-l-2 border-black min-w-[100px]">TOT.</th>
-                        <th className="px-3 py-2 text-center w-10"></th>
+                        <th className="px-4 py-4 font-black text-black text-right bg-gray-100 border-l border-gray-200 min-w-[100px]">TOT.</th>
+                        <th className="px-3 py-3 text-center w-12"></th>
                       </tr>
                     </thead>
 
                     {/* --- SEKTION 1: TAGESBUDGETS --- */}
                     <tbody>
                       <tr>
-                        <td colSpan={totalColumns} className="bg-black p-0 border-b-2 border-white">
-                          <div className="sticky left-0 px-4 py-2 text-white font-bold text-sm uppercase tracking-widest inline-block">
+                        <td colSpan={totalColumns} className="bg-gray-100 p-0 border-b border-gray-200">
+                          <div className="sticky left-0 px-4 py-2.5 text-black font-black text-xs uppercase tracking-widest inline-block">
                             Tagesbudgets (Editierbar)
                           </div>
                         </td>
@@ -733,14 +782,14 @@ export default function App() {
                          const displayTb = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(avgTb);
 
                          return (
-                          <tr key={`tb-${camp.id}`} className={`${rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} border-b border-gray-200 hover:bg-gray-100 group`}>
-                            <td className="px-4 py-2 text-black sticky left-0 z-10 border-r border-gray-300 shadow-[1px_0_0_black]" style={{ backgroundColor: rIdx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                              <input type="text" value={camp.market} onChange={(e) => handleCampaignEdit(camp.id, 'market', e.target.value)} className="w-full bg-transparent font-bold outline-none focus:border-b-2 focus:border-black" placeholder="Markt" />
+                          <tr key={`tb-${camp.id}`} className={`${rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} border-b border-gray-100 hover:bg-gray-100 transition-colors group`}>
+                            <td className="px-4 py-2 text-black sticky left-0 z-10 border-r border-gray-200 bg-inherit">
+                              <input type="text" value={camp.market} onChange={(e) => handleCampaignEdit(camp.id, 'market', e.target.value)} className="w-full bg-transparent font-bold outline-none focus:border-b focus:border-black" placeholder="Markt" />
                             </td>
-                            <td className="px-4 py-2 font-black text-black sticky left-[100px] z-10 border-r border-black" style={{ backgroundColor: rIdx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                              <input type="text" value={camp.name} onChange={(e) => handleCampaignEdit(camp.id, 'name', e.target.value)} className="w-full bg-transparent outline-none focus:border-b-2 focus:border-black" placeholder="Kampagnenname" />
+                            <td className="px-4 py-2 font-black text-black sticky left-[100px] z-10 border-r border-gray-200 bg-inherit">
+                              <input type="text" value={camp.name} onChange={(e) => handleCampaignEdit(camp.id, 'name', e.target.value)} className="w-full bg-transparent outline-none focus:border-b focus:border-black" placeholder="Kampagnenname" />
                             </td>
-                            <td className="px-2 py-2 border-r border-gray-300 align-middle bg-gray-50/50">
+                            <td className="px-2 py-2 border-r border-gray-200 align-middle bg-gray-50">
                               <div className="relative flex items-center justify-end w-full">
                                 <input 
                                   type="text" 
@@ -754,21 +803,21 @@ export default function App() {
                                   }}
                                   onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
                                   placeholder="-"
-                                  className="w-full bg-transparent text-sm font-black text-black outline-none focus:border-b-2 focus:border-black text-right pr-4" 
+                                  className="w-full bg-transparent text-sm font-black text-black outline-none focus:border-b focus:border-black text-right pr-4" 
                                 />
-                                <span className="absolute right-1 text-[10px] font-bold text-gray-500">€</span>
+                                <span className="absolute right-1 text-[10px] font-bold text-gray-400">€</span>
                               </div>
                             </td>
-                            <td className="px-2 py-2 border-r border-gray-300 align-middle">
-                              <input type="date" value={camp.startDate} onChange={(e) => handleCampaignEdit(camp.id, 'startDate', e.target.value)} className="w-full bg-transparent text-xs font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
+                            <td className="px-2 py-2 border-r border-gray-200 align-middle">
+                              <input type="date" value={camp.startDate} onChange={(e) => handleCampaignEdit(camp.id, 'startDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
                             </td>
-                            <td className="px-2 py-2 border-r border-gray-300 align-middle">
-                              <input type="date" value={camp.endDate} onChange={(e) => handleCampaignEdit(camp.id, 'endDate', e.target.value)} className="w-full bg-transparent text-xs font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
+                            <td className="px-2 py-2 border-r border-gray-200 align-middle">
+                              <input type="date" value={camp.endDate} onChange={(e) => handleCampaignEdit(camp.id, 'endDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
                             </td>
-                            <td className="px-1 py-2 border-r border-black align-middle text-center bg-gray-50/50">
+                            <td className="px-1 py-2 border-r border-gray-200 align-middle text-center bg-gray-50/30">
                               <button 
                                 onClick={() => setCampaignToFullRuntime(camp.id)} 
-                                className="p-1 text-gray-500 hover:bg-black hover:text-white rounded transition-colors mx-auto flex items-center justify-center"
+                                className="p-1.5 text-gray-400 hover:bg-gray-200 hover:text-black rounded-lg transition-colors mx-auto flex items-center justify-center"
                                 title="Auf gesamte Laufzeit (Briefing) zurücksetzen"
                               >
                                 <RotateCcw size={14} strokeWidth={2.5} />
@@ -780,17 +829,17 @@ export default function App() {
                               const isActive = cDays > 0;
                               const val = camp.budgets[m.key] || 0;
                               return (
-                                <td key={`tb-${camp.id}-${m.key}`} className={`p-1 border-r border-gray-200 text-center ${isPast ? 'bg-gray-100' : (!isActive ? 'bg-gray-50' : '')}`}>
+                                <td key={`tb-${camp.id}-${m.key}`} className={`p-1.5 border-r border-gray-100 text-center ${isPast ? 'bg-gray-50/50' : (!isActive ? 'bg-gray-50/30' : '')}`}>
                                   {isActive ? (
                                     <div className="flex items-center justify-center">
                                       <input
-                                        type="number" value={val === 0 ? '' : val} onChange={(e) => handleDailyBudgetChange(camp.id, m.key, e.target.value)} placeholder="-"
-                                        className={`${getWidthClass(val)} text-center px-1 py-1 rounded-sm text-sm font-bold outline-none transition-all duration-200
-                                          ${isPast ? 'bg-transparent text-gray-500 border border-transparent hover:border-gray-400 focus:border-black' : 'bg-white border border-gray-300 hover:border-black focus:border-black focus:ring-1 focus:ring-black text-black'}
+                                        type="number" step="0.01" value={val === 0 ? '' : val} onChange={(e) => handleDailyBudgetChange(camp.id, m.key, e.target.value)} placeholder="-"
+                                        className={`${getWidthClass(val)} text-center px-1.5 py-1.5 rounded-md text-sm font-bold outline-none transition-all duration-200
+                                          ${isPast ? 'bg-transparent text-gray-500 border border-transparent hover:border-gray-300 focus:border-gray-400' : 'bg-white border border-gray-200 hover:border-black focus:border-black focus:ring-1 focus:ring-black text-black shadow-sm'}
                                         `}
                                       />
-                                      <span className={`text-xs font-bold ml-1 ${isPast ? 'text-gray-500' : 'text-black'}`}>€</span>
-                                      {cDays < m.days && <span className="text-[9px] font-bold text-gray-400 ml-1" title={`${cDays} aktive Tage`}>({cDays}T)</span>}
+                                      <span className={`text-[11px] font-bold ml-1 ${isPast ? 'text-gray-400' : 'text-gray-600'}`}>€</span>
+                                      {cDays < m.days && <span className="text-[9px] font-bold text-blue-400 ml-1" title={`${cDays} aktive Tage`}>({cDays}T)</span>}
                                     </div>
                                   ) : (
                                     <span className="text-gray-300 text-xs">-</span>
@@ -798,14 +847,14 @@ export default function App() {
                                 </td>
                               );
                             })}
-                            <td className="px-4 py-2 border-l-2 border-black bg-gray-100 text-right font-black text-black">
+                            <td className="px-4 py-2 border-l border-gray-200 bg-gray-50 text-right font-black text-gray-800">
                                {formatCurrency(campTotal)}
                             </td>
-                            <td className="px-2 py-2 text-center bg-white flex items-center justify-center gap-1 h-full min-h-[40px]">
-                              <button onClick={() => handleDuplicateCampaign(camp.id)} className="text-gray-300 hover:text-blue-600 transition-colors opacity-0 group-hover:opacity-100" title="Kampagne duplizieren (Boost)">
+                            <td className="px-2 py-2 text-center bg-white flex items-center justify-center gap-1 h-full min-h-[44px]">
+                              <button onClick={() => handleDuplicateCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-blue-50 hover:text-blue-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne duplizieren (Boost)">
                                 <Copy size={16} />
                               </button>
-                              <button onClick={() => handleDeleteCampaign(camp.id)} className="text-gray-300 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100" title="Kampagne löschen">
+                              <button onClick={() => handleDeleteCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne löschen">
                                 <Trash2 size={16} />
                               </button>
                             </td>
@@ -814,23 +863,23 @@ export default function App() {
                       })}
 
                       {/* --- SUMME TAGESBUDGETS --- */}
-                      <tr className="bg-gray-100 border-t-2 border-black">
-                        <td className="px-4 py-3 font-black text-black text-left sticky left-0 z-20 bg-gray-100 border-r border-gray-300 shadow-[1px_0_0_black]">SUMME</td>
-                        <td className="px-4 py-3 font-black text-black text-left sticky left-[100px] z-20 bg-gray-100 border-r border-black">Tagesbudgets</td>
-                        <td className="border-r border-gray-300 bg-gray-100"></td>
-                        <td className="border-r border-gray-300 bg-gray-100"></td>
-                        <td className="border-r border-gray-300 bg-gray-100"></td>
-                        <td className="border-r border-black bg-gray-100"></td>
+                      <tr className="bg-gray-100 border-t border-gray-300">
+                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-0 z-20 bg-gray-100 border-r border-gray-200">SUMME</td>
+                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-[100px] z-20 bg-gray-100 border-r border-gray-200">Tagesbudgets</td>
+                        <td className="border-r border-gray-200 bg-gray-100"></td>
+                        <td className="border-r border-gray-200 bg-gray-100"></td>
+                        <td className="border-r border-gray-200 bg-gray-100"></td>
+                        <td className="border-r border-gray-200 bg-gray-100"></td>
                         {generatedMonths.map(m => {
                           let sum = 0;
                           campaigns.forEach(c => sum += (c.budgets[m.key] || 0));
                           return (
-                             <td key={`sum-${m.key}`} className="px-1 py-3 text-center border-r border-gray-300 font-black text-black bg-gray-100">
-                               {sum > 0 ? `${sum} €` : '-'}
+                             <td key={`sum-${m.key}`} className="px-1 py-3.5 text-center border-r border-gray-200 font-black text-gray-700 bg-gray-100">
+                               {sum > 0 ? formatCurrency(sum) : '-'}
                              </td>
                           );
                         })}
-                        <td className="px-4 py-3 border-l-2 border-black bg-gray-100 text-right font-black text-black">
+                        <td className="px-4 py-3.5 border-l border-gray-200 bg-gray-100 text-right font-black text-black">
                           {formatCurrency(totals.grandTotal)}
                         </td>
                         <td className="px-2 py-2 bg-gray-100"></td>
@@ -838,10 +887,10 @@ export default function App() {
 
                       {/* --- KAMPAGNE HINZUFÜGEN BUTTON --- */}
                       <tr>
-                        <td colSpan={totalColumns} className="bg-gray-50 p-0 border-t-2 border-gray-300 border-b-2 border-black">
-                           <div className="sticky left-0 inline-block p-3 mb-6">
-                              <button onClick={handleAddCampaign} className="text-xs font-black uppercase tracking-wider text-black hover:bg-gray-200 px-3 py-1.5 border border-black transition-colors flex items-center gap-1.5">
-                                <Plus size={14} strokeWidth={3} /> Kampagne hinzufügen
+                        <td colSpan={totalColumns} className="bg-white p-0 border-t border-gray-200">
+                           <div className="sticky left-0 inline-block p-4">
+                              <button onClick={handleAddCampaign} className="text-xs font-black uppercase tracking-wider text-black bg-white hover:bg-gray-50 px-4 py-2 border border-gray-300 rounded-lg transition-colors shadow-sm flex items-center gap-2">
+                                <Plus size={16} strokeWidth={2.5} /> Kampagne hinzufügen
                               </button>
                            </div>
                         </td>
@@ -851,8 +900,8 @@ export default function App() {
                     {/* --- SEKTION 2: GESAMTBUDGETS --- */}
                     <tbody>
                       <tr>
-                        <td colSpan={totalColumns} className="bg-black p-0 border-t-4 border-white border-b-2 border-white">
-                           <div className="sticky left-0 px-4 py-2 text-white font-bold text-sm uppercase tracking-widest inline-block">
+                        <td colSpan={totalColumns} className="bg-gray-100 p-0 border-t border-gray-200 border-b border-gray-200">
+                           <div className="sticky left-0 px-4 py-2.5 text-black font-black text-xs uppercase tracking-widest inline-block">
                               Monats- & Gesamtbudgets (Berechnet)
                            </div>
                         </td>
@@ -863,47 +912,47 @@ export default function App() {
                         const campEndStr = camp.endDate || plannerEnd;
 
                         return (
-                          <tr key={`tot-${camp.id}`} className={`${rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} border-b border-gray-200 hover:bg-gray-100`}>
-                            <td className="px-4 py-2 font-bold text-black text-left sticky left-0 z-10 border-r border-gray-300 shadow-[1px_0_0_black]" style={{ backgroundColor: rIdx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>{camp.market}</td>
-                            <td className="px-4 py-2 font-black text-black text-left sticky left-[100px] z-10 border-r border-black" style={{ backgroundColor: rIdx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>{camp.name}</td>
-                            <td className="px-2 py-2 border-r border-gray-300 text-xs font-bold text-gray-500"></td>
-                            <td className="px-2 py-2 border-r border-gray-300 text-xs font-bold text-gray-500">{formatDateStr(camp.startDate)}</td>
-                            <td className="px-2 py-2 border-r border-gray-300 text-xs font-bold text-gray-500">{formatDateStr(camp.endDate)}</td>
-                            <td className="px-1 py-2 border-r border-black"></td>
+                          <tr key={`tot-${camp.id}`} className={`${rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} border-b border-gray-100 hover:bg-gray-50`}>
+                            <td className="px-4 py-3 font-bold text-gray-700 text-left sticky left-0 z-10 border-r border-gray-200 bg-inherit">{camp.market}</td>
+                            <td className="px-4 py-3 font-black text-gray-900 text-left sticky left-[100px] z-10 border-r border-gray-200 bg-inherit">{camp.name}</td>
+                            <td className="px-2 py-3 border-r border-gray-200 text-xs font-bold text-gray-500"></td>
+                            <td className="px-2 py-3 border-r border-gray-200 text-[11px] font-bold text-gray-500">{formatDateStr(camp.startDate)}</td>
+                            <td className="px-2 py-3 border-r border-gray-200 text-[11px] font-bold text-gray-500">{formatDateStr(camp.endDate)}</td>
+                            <td className="px-1 py-3 border-r border-gray-200"></td>
                             {generatedMonths.map((m) => {
                               const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
                               const val = camp.budgets[m.key] || 0;
                               const monthBudget = val * cDays;
                               campTotal += monthBudget;
                               return (
-                                <td key={`tot-${camp.id}-${m.key}`} className={`px-3 py-2 text-center border-r border-gray-200 ${monthBudget === 0 ? 'text-gray-300' : 'text-black font-medium'}`}>
+                                <td key={`tot-${camp.id}-${m.key}`} className={`px-3 py-3 text-center border-r border-gray-100 ${monthBudget === 0 ? 'text-gray-300' : 'text-gray-700 font-medium'}`}>
                                   {monthBudget === 0 ? '-' : formatCurrency(monthBudget)}
                                 </td>
                               );
                             })}
-                            <td className="px-4 py-2 font-black text-black text-right bg-gray-100 border-l-2 border-black">
+                            <td className="px-4 py-3 font-black text-black text-right bg-gray-50 border-l border-gray-200">
                               {formatCurrency(campTotal)}
                             </td>
-                            <td className="px-2 py-2 text-center"></td>
+                            <td className="px-2 py-3 text-center"></td>
                           </tr>
                         );
                       })}
                     </tbody>
                     
-                    <tfoot className="bg-white border-t-4 border-black">
+                    <tfoot className="bg-white border-t border-gray-300">
                       <tr>
-                        <td className="px-4 py-4 font-black uppercase tracking-widest text-black text-left sticky left-0 z-20 bg-white border-r border-gray-300 shadow-[1px_0_0_black]">GESAMT</td>
-                        <td className="px-4 py-4 font-black uppercase tracking-widest text-black text-left sticky left-[100px] z-20 bg-white border-r border-black">BUDGET</td>
-                        <td className="border-r border-gray-300"></td>
-                        <td className="border-r border-gray-300"></td>
-                        <td className="border-r border-gray-300"></td>
-                        <td className="border-r border-black"></td>
+                        <td className="px-4 py-4 font-black uppercase tracking-widest text-black text-left sticky left-0 z-20 bg-gray-50 border-r border-gray-200">GESAMT</td>
+                        <td className="px-4 py-4 font-black uppercase tracking-widest text-black text-left sticky left-[100px] z-20 bg-gray-50 border-r border-gray-200">BUDGET</td>
+                        <td className="border-r border-gray-200 bg-gray-50"></td>
+                        <td className="border-r border-gray-200 bg-gray-50"></td>
+                        <td className="border-r border-gray-200 bg-gray-50"></td>
+                        <td className="border-r border-gray-200 bg-gray-50"></td>
                         {generatedMonths.map((m) => (
-                          <td key={`foot-${m.key}`} className="px-3 py-4 text-center font-black text-black border-r border-gray-300">
+                          <td key={`foot-${m.key}`} className="px-3 py-4 text-center font-black text-gray-800 border-r border-gray-200 bg-gray-50">
                             {formatCurrency(totals.monthlyTotals[m.key])}
                           </td>
                         ))}
-                        <td className={`px-4 py-4 font-black text-right border-l-4 border-black text-lg ${budgetExceededBy > 0 ? 'bg-black text-white' : 'bg-gray-100 text-black'}`}>
+                        <td className={`px-4 py-4 font-black text-right border-l border-gray-300 text-lg ${budgetExceededBy > 0 ? 'bg-red-50 text-red-600' : 'bg-black text-white'} rounded-br-2xl`}>
                           {formatCurrency(totals.grandTotal)}
                         </td>
                         <td></td>
@@ -916,142 +965,156 @@ export default function App() {
             </div>
 
             {/* --- SIDEBAR: KI ASSISTENT & VERTEILUNG --- */}
-            <div className="xl:col-span-1 space-y-6">
-              
-              {/* MARKET SHARES WIDGET */}
-              <div className="bg-white border-2 border-black shadow-sm">
-                <div className="bg-black p-3 text-white flex items-center justify-between">
-                  <h2 className="font-black uppercase tracking-wider text-xs">Budget-Verteilung (Markt)</h2>
-                </div>
-                <div className="p-4">
-                  {marketShares.length === 0 || totals.grandTotal === 0 ? (
-                    <p className="text-xs text-gray-500 font-bold">Noch keine Budgets geplant.</p>
-                  ) : (
-                    <div className="space-y-4">
-                      {marketShares.map(ms => (
-                        <div key={ms.market}>
-                          <div className="flex justify-between items-end mb-1">
-                            <span className="text-xs font-black uppercase tracking-wide">{ms.market}</span>
-                            <span className="text-[11px] font-bold text-gray-600">
-                              {formatCurrency(ms.amount)} <span className="text-black">({ms.percent.toFixed(1)}%)</span>
-                            </span>
-                          </div>
-                          <div className="w-full bg-gray-200 h-2">
-                            <div className="bg-black h-2 transition-all duration-500" style={{ width: `${ms.percent}%` }}></div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* KI ASSISTENT */}
-              <div className="bg-white border-2 border-black overflow-hidden flex flex-col h-[500px] xl:h-[calc(100vh-340px)] sticky top-6">
-                <div className="bg-black p-4 text-white flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Sparkles size={18} className="text-white" />
-                    <h2 className="font-black uppercase tracking-wider text-sm">Briefing Assistent</h2>
-                  </div>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
-                  {chatHistory.length === 0 ? (
-                    <div className="text-center text-gray-400 text-sm mt-10">
-                      <Bot size={40} className="mx-auto mb-3 text-black opacity-30" />
-                      <p className="font-bold text-black mb-2">Wie kann ich helfen?</p>
-                      <p className="text-xs">"Plane eine DACH Kampagne ab 15.04. bis 30.08. mit 40€..."</p>
-                    </div>
-                  ) : (
-                    chatHistory.map((msg, i) => (
-                      <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                        <div className={`text-[10px] font-black uppercase mb-1 ${msg.role === 'user' ? 'text-gray-400' : 'text-black'}`}>
-                          {msg.role === 'user' ? 'Du' : msg.role === 'error' ? 'Fehler' : 'Assistent'}
-                        </div>
-                        <div className={`p-3 max-w-[90%] text-sm font-medium ${
-                          msg.role === 'user' ? 'bg-black text-white rounded-l-xl rounded-br-xl' : 
-                          msg.role === 'error' ? 'bg-white border-2 border-black text-black rounded-r-xl rounded-bl-xl font-bold' : 
-                          'bg-white border border-gray-300 text-black shadow-sm rounded-r-xl rounded-bl-xl'
-                        }`}>
-                          {msg.text}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                  
-                  {isAiLoading && (
-                    <div className="flex flex-col items-start">
-                      <div className="text-[10px] font-black uppercase mb-1 text-black">Assistent</div>
-                      <div className="bg-white border border-gray-300 shadow-sm rounded-r-xl rounded-bl-xl p-3 flex gap-1 items-center">
-                        <div className="w-2 h-2 bg-black rounded-full animate-bounce"></div>
-                        <div className="w-2 h-2 bg-black rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                        <div className="w-2 h-2 bg-black rounded-full animate-bounce" style={{animationDelay: '0.4s'}}></div>
-                      </div>
-                    </div>
-                  )}
-                  <div ref={chatEndRef} />
-                </div>
-
-                <div className="p-3 bg-white border-t-2 border-black">
-                  <div className="relative">
-                    <textarea 
-                      value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAiSubmit(); } }}
-                      placeholder="Befehl eingeben..."
-                      className="w-full bg-gray-100 border-2 border-transparent focus:border-black rounded-none pl-3 pr-10 py-3 text-sm font-medium outline-none resize-none"
-                      rows="3" disabled={isAiLoading}
-                    />
-                    <button onClick={handleAiSubmit} disabled={isAiLoading || !chatInput.trim()} className="absolute right-2 bottom-2 p-2 bg-black text-white hover:bg-gray-800 transition-colors disabled:opacity-50">
-                      <Send size={16} />
-                    </button>
-                  </div>
-                  <div className="text-[9px] font-bold text-gray-400 mt-2 text-center uppercase tracking-widest">
-                    {!isAiLoading && chatHistory.length === 0 ? 'Bitte API Key im Code hinterlegen' : 'Powered by Gemini AI'}
-                  </div>
-                </div>
+            {isSidebarOpen && (
+              <div className="xl:col-span-1 space-y-6">
                 
+                {/* MARKET SHARES WIDGET */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                  <div className="bg-gray-50 border-b border-gray-200 p-4 flex items-center justify-between">
+                    <h2 className="font-black uppercase tracking-wider text-xs text-black">Budget-Verteilung (Markt)</h2>
+                  </div>
+                  <div className="p-5">
+                    {marketShares.length === 0 || totals.grandTotal === 0 ? (
+                      <p className="text-xs text-gray-500 font-bold text-center py-4">Noch keine Budgets geplant.</p>
+                    ) : (
+                      <div className="space-y-4">
+                        {marketShares.map(ms => (
+                          <div key={ms.market}>
+                            <div className="flex justify-between items-end mb-1.5">
+                              <span className="text-xs font-black uppercase tracking-wide text-black">{ms.market}</span>
+                              <span className="text-[11px] font-bold text-gray-500">
+                                {formatCurrency(ms.amount)} <span className="text-black ml-1 bg-gray-100 px-1.5 py-0.5 rounded">{ms.percent.toFixed(1)}%</span>
+                              </span>
+                            </div>
+                            <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden">
+                              <div className="bg-black h-2 transition-all duration-500 rounded-full" style={{ width: `${ms.percent}%` }}></div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* KI ASSISTENT */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[500px] xl:h-[calc(100vh-280px)] sticky top-6">
+                  <div className="bg-gray-50 border-b border-gray-200 p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="bg-blue-100 p-1.5 rounded-lg"><Sparkles size={16} className="text-blue-600" /></div>
+                      <h2 className="font-black uppercase tracking-wider text-xs text-black">Briefing Assistent</h2>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white">
+                    {chatHistory.length === 0 ? (
+                      <div className="text-center text-gray-400 text-sm mt-10">
+                        <div className="bg-gray-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 border border-gray-100"><Bot size={32} className="text-gray-400" /></div>
+                        <p className="font-bold text-black mb-2">Wie kann ich helfen?</p>
+                        <p className="text-xs leading-relaxed max-w-[200px] mx-auto">"Plane eine DACH Kampagne ab 15.04. bis 30.08. mit 40€ Tagesbudget..."</p>
+                      </div>
+                    ) : (
+                      chatHistory.map((msg, i) => (
+                        <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                          <div className={`text-[9px] font-black uppercase mb-1 ${msg.role === 'user' ? 'text-gray-400' : 'text-black'}`}>
+                            {msg.role === 'user' ? 'Du' : msg.role === 'error' ? 'System' : 'Assistent'}
+                          </div>
+                          <div className={`px-4 py-2.5 max-w-[90%] text-sm font-medium shadow-sm ${
+                            msg.role === 'user' ? 'bg-black text-white rounded-2xl rounded-tr-sm' : 
+                            msg.role === 'error' ? 'bg-red-50 border border-red-200 text-red-800 rounded-2xl rounded-tl-sm font-bold text-xs' : 
+                            'bg-gray-50 border border-gray-100 text-black rounded-2xl rounded-tl-sm'
+                          }`}>
+                            {msg.text}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    
+                    {isAiLoading && (
+                      <div className="flex flex-col items-start">
+                        <div className="text-[9px] font-black uppercase mb-1 text-black">Assistent</div>
+                        <div className="bg-gray-50 border border-gray-100 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3.5 flex gap-1.5 items-center">
+                          <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></div>
+                          <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                          <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.4s'}}></div>
+                        </div>
+                      </div>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+
+                  <div className="p-3 bg-gray-50 border-t border-gray-200">
+                    <div className="relative">
+                      <textarea 
+                        value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAiSubmit(); } }}
+                        placeholder="Befehl eingeben..."
+                        className="w-full bg-white border border-gray-300 focus:border-black focus:ring-1 focus:ring-black rounded-xl pl-4 pr-12 py-3 text-sm font-medium outline-none resize-none shadow-sm transition-shadow"
+                        rows="2" disabled={isAiLoading}
+                      />
+                      <button onClick={handleAiSubmit} disabled={isAiLoading || !chatInput.trim()} className="absolute right-2 bottom-2 p-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50">
+                        <Send size={16} />
+                      </button>
+                    </div>
+                    <div className="text-[9px] font-bold text-gray-400 mt-2 text-center uppercase tracking-widest">
+                      Powered by Gemini AI
+                    </div>
+                  </div>
+                  
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </div>
 
       {/* MODAL: PROJEKTE & HISTORIE */}
       {isProjectModalOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-white border-4 border-black w-full max-w-3xl max-h-[80vh] flex flex-col shadow-2xl">
-             <div className="bg-black text-white p-4 flex justify-between items-center">
-                <h2 className="font-black uppercase tracking-wider">Projekte & Versionen</h2>
-                <button onClick={() => setIsProjectModalOpen(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
+        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-gray-200 w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+             <div className="bg-gray-50 border-b border-gray-200 p-5 flex justify-between items-center">
+                <h2 className="font-black uppercase tracking-wider text-black">Gespeicherte Projekte</h2>
+                <button onClick={() => setIsProjectModalOpen(false)} className="text-gray-400 hover:text-black bg-white rounded-full p-1 border border-gray-200 shadow-sm transition-colors"><X size={20} /></button>
              </div>
-             <div className="p-6 overflow-y-auto flex-1 bg-gray-50">
-                <p className="text-xs text-gray-500 font-bold mb-4">
-                   Hinweis: Diese Versionen sind im Zwischenspeicher gesichert. Nach einem Neuladen der Webseite gehen sie verloren.
+             <div className="p-6 overflow-y-auto flex-1 bg-white">
+                <p className="text-xs text-gray-500 font-medium mb-6 bg-blue-50 text-blue-800 p-3 rounded-xl border border-blue-100 flex items-start gap-2">
+                   <Info size={16} className="mt-0.5 shrink-0" />
+                   Diese Projekte werden sicher in der Cloud gespeichert. Alle Mitarbeiter mit Zugriff auf das Tool sehen diesen aktuellen Stand.
                 </p>
                 {savedProjects.length === 0 ? (
-                   <div className="text-center py-10 border-2 border-dashed border-gray-300 text-gray-400 font-bold">
-                     Noch keine Versionen gespeichert.
+                   <div className="text-center py-12 border-2 border-dashed border-gray-200 rounded-2xl text-gray-400 font-bold bg-gray-50/50">
+                     Noch keine Projekte gespeichert.
                    </div>
                 ) : (
-                   <div className="space-y-3">
+                   <div className="space-y-4">
                       {savedProjects.map((proj) => (
-                         <div key={proj.id} className="bg-white border-2 border-black p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 hover:shadow-md transition-shadow">
+                         <div key={proj.id} className="bg-white border border-gray-200 rounded-xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 hover:shadow-md transition-shadow group">
                             <div>
-                               <h3 className="font-black text-black text-lg">{proj.clientName}</h3>
-                               <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mt-1">
-                                  {formatDateStr(proj.plannerStart)} — {formatDateStr(proj.plannerEnd)}
+                               <h3 className="font-black text-black text-lg flex items-center gap-2">
+                                 <User size={16} className="text-gray-400" /> {proj.clientName}
+                               </h3>
+                               <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mt-1.5 flex items-center gap-1.5">
+                                  <Calendar size={12} /> {formatDateStr(proj.plannerStart)} — {formatDateStr(proj.plannerEnd)}
                                </p>
+                               <p className="text-[10px] text-gray-400 mt-2">Gespeichert am: {proj.timestamp}</p>
                             </div>
-                            <div className="flex items-center gap-6">
-                               <div className="text-right">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Zielbudget</p>
-                                  <p className="font-black">{formatCurrency(proj.targetBudget)}</p>
+                            <div className="flex items-center gap-4 sm:gap-6 w-full sm:w-auto">
+                               <div className="text-right flex-1 sm:flex-none bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-100">
+                                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-0.5">Zielbudget</p>
+                                  <p className="font-black text-black">{formatCurrency(proj.targetBudget)}</p>
                                </div>
-                               <button 
-                                 onClick={() => handleLoadProject(proj)}
-                                 className="px-4 py-2 bg-black text-white hover:bg-gray-800 font-black uppercase text-xs tracking-wider border-2 border-black"
-                               >
-                                 Wiederherstellen
-                               </button>
+                               <div className="flex flex-col gap-2">
+                                 <button 
+                                   onClick={() => handleLoadProject(proj)}
+                                   className="px-4 py-2 bg-black text-white hover:bg-gray-800 rounded-lg font-bold uppercase text-[10px] tracking-wider shadow-sm transition-colors"
+                                 >
+                                   Laden
+                                 </button>
+                                 <button 
+                                   onClick={() => handleDeleteProject(proj.id)}
+                                   className="px-4 py-2 bg-white text-red-600 hover:bg-red-50 border border-red-200 rounded-lg font-bold uppercase text-[10px] tracking-wider transition-colors opacity-0 group-hover:opacity-100"
+                                 >
+                                   Löschen
+                                 </button>
+                               </div>
                             </div>
                          </div>
                       ))}
@@ -1063,10 +1126,10 @@ export default function App() {
       )}
       
       <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar { height: 12px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f3f4f6; border-top: 2px solid #000; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #000000; border-radius: 0px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #374151; }
+        .custom-scrollbar::-webkit-scrollbar { height: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f8fafc; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; border: 2px solid #f8fafc; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
       `}} />
     </div>
   );
