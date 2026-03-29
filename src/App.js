@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -10,14 +10,14 @@ if (typeof __firebase_config !== 'undefined') {
   firebaseConfig = JSON.parse(__firebase_config);
 } else {
   // 🔴🔴🔴 HIER DEINE FIREBASE DATEN EINTRAGEN 🔴🔴🔴
-  // Ersetze die Platzhalter in den Anführungszeichen durch deine Daten aus der Firebase Console
   firebaseConfig = {
-  apiKey: "AIzaSyBL9f_kigv3UYrLwq59hGj2VI7wV0G9-LU",
+apiKey: "AIzaSyBL9f_kigv3UYrLwq59hGj2VI7wV0G9-LU",
   authDomain: "brandnamic-media-planning-tool.firebaseapp.com",
   projectId: "brandnamic-media-planning-tool",
   storageBucket: "brandnamic-media-planning-tool.firebasestorage.app",
   messagingSenderId: "577187396851",
   appId: "1:577187396851:web:e05df3908fb9431d91cb86"
+
   };
   // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
 }
@@ -28,8 +28,11 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'media-planner-v1';
 
 // --- HILFSFUNKTIONEN ---
 const formatCurrency = (value) => {
-  // Zeigt jetzt bis zu 2 Kommastellen (Cent) an, wenn vorhanden, für absolute Präzision
-  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value || 0);
+  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
+};
+
+const formatNumber = (value) => {
+  return new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
 };
 
 const formatDateStr = (dateStr) => {
@@ -63,7 +66,7 @@ const fetchWithBackoff = async (url, options, maxRetries = 5) => {
       const response = await fetch(url, options);
       if (!response.ok) {
         const errText = await response.text();
-        if (response.status === 403 || response.status === 400) {
+        if (response.status === 403 || response.status === 400 || response.status === 401) {
            throw new Error(`Client Error ${response.status}: ${errText}`);
         }
         throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
@@ -88,7 +91,6 @@ const generateInitialState = () => {
 };
 
 export default function App() {
-  // --- GLOBALE STATE ---
   const [clientName, setClientName] = useState('');
   const [plannerStart, setPlannerStart] = useState(`${currentYear}-01-01`);
   const [plannerEnd, setPlannerEnd] = useState(`${currentYear}-12-31`);
@@ -97,12 +99,13 @@ export default function App() {
   const [campaigns, setCampaigns] = useState(generateInitialState());
   const [targetBudget, setTargetBudget] = useState(0); 
   
-  // --- PROJEKT SPEICHER (Cloud Firestore) ---
+  // Projekt-Management & Auto-Save
   const [savedProjects, setSavedProjects] = useState([]);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [user, setUser] = useState(null);
+  const [activeProjectId, setActiveProjectId] = useState(null);
+  const [syncStatus, setSyncStatus] = useState(''); // '', 'saving', 'saved'
 
-  // 1. Authentifizierung bei Cloud-Verbindung
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -120,7 +123,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Projekte in Echtzeit aus der Cloud laden
   useEffect(() => {
     if (!user) return;
     const projectsRef = collection(db, 'artifacts', appId, 'public', 'data', 'projects');
@@ -137,23 +139,51 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // --- UI STATE ---
+  // --- AUTO-SAVE LOGIK ---
+  useEffect(() => {
+    if (!activeProjectId || !user) return;
+    
+    setSyncStatus('saving');
+    const timer = setTimeout(async () => {
+      try {
+        const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', activeProjectId);
+        await setDoc(projectRef, {
+          timestamp: new Date().toLocaleString('de-DE', { hour12: false }),
+          clientName: clientName || 'Unbenannter Kunde',
+          plannerStart,
+          plannerEnd,
+          targetBudget,
+          campaigns: JSON.parse(JSON.stringify(campaigns))
+        }, { merge: true }); // Merge verhindert Überschreiben der createdAt Zeit
+        setSyncStatus('saved');
+        setTimeout(() => setSyncStatus(''), 2500); // Erfolgsmeldung nach 2,5s ausblenden
+      } catch (error) {
+        console.error("Auto-save error:", error);
+        setSyncStatus('');
+      }
+    }, 1500); // 1.5 Sekunden nach der letzten Änderung speichern
+    
+    return () => clearTimeout(timer);
+  }, [campaigns, clientName, plannerStart, plannerEnd, targetBudget, activeProjectId, user]);
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [rebalanceLog, setRebalanceLog] = useState(null);
   const [chatInput, setChatInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState([]);
+  
+  // Controlled Inputs für flüssiges Tippen trotz Formatierung
   const [activeTotalInput, setActiveTotalInput] = useState({ id: null, value: '' });
+  const [activeDailyInput, setActiveDailyInput] = useState({ id: null, month: null, value: '' });
+  
   const chatEndRef = useRef(null);
 
-  // --- DATENVALIDIERUNG ---
   const isInvalidDateRange = useMemo(() => {
     const s = parseDate(plannerStart);
     const e = parseDate(plannerEnd);
     return s && e && s > e;
   }, [plannerStart, plannerEnd]);
 
-  // --- MONATS-GENERATOR ---
   const generatedMonths = useMemo(() => {
     if (isInvalidDateRange) return [];
     const months = [];
@@ -193,7 +223,6 @@ export default function App() {
     return months;
   }, [plannerStart, plannerEnd, isInvalidDateRange]);
 
-  // --- BERECHNUNG DER SUMMEN ---
   const totals = useMemo(() => {
     let monthlyTotals = {};
     generatedMonths.forEach(m => monthlyTotals[m.key] = 0);
@@ -213,16 +242,13 @@ export default function App() {
       });
     }
     
-    // Auf Cent runden, um JS Floating-Point-Probleme (z.B. 40.000,000001) zu vermeiden
     grandTotal = Math.round(grandTotal * 100) / 100;
     
     return { monthlyTotals, grandTotal };
   }, [campaigns, generatedMonths, plannerStart, plannerEnd, isInvalidDateRange]);
 
-  // Auf Cent genauer Check
   const budgetExceededBy = Math.round((totals.grandTotal - targetBudget) * 100) / 100;
 
-  // --- MARKT-VERTEILUNG ---
   const marketShares = useMemo(() => {
     const shares = {};
     campaigns.forEach(camp => {
@@ -246,17 +272,16 @@ export default function App() {
       .sort((a, b) => b.amount - a.amount);
   }, [campaigns, generatedMonths, plannerStart, plannerEnd, totals.grandTotal]);
 
-  // --- PROJEKT HANDLER (Cloud) ---
   const handleSaveProject = async () => {
     if (!user) {
-      setRebalanceLog(["Fehler: Keine Datenbank-Verbindung (User nicht authentifiziert)."]);
+      setRebalanceLog(["Fehler: Keine Datenbank-Verbindung."]);
       return;
     }
     
-    const projectId = Date.now().toString();
+    const projectId = activeProjectId || Date.now().toString();
     const projectData = {
       timestamp: new Date().toLocaleString('de-DE', { hour12: false }),
-      createdAt: Date.now(),
+      createdAt: activeProjectId ? undefined : Date.now(), // Nur beim ersten Erstellen setzen
       clientName: clientName || 'Unbenannter Kunde',
       plannerStart,
       plannerEnd,
@@ -266,8 +291,11 @@ export default function App() {
     
     try {
       const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', projectId);
-      await setDoc(projectRef, projectData);
-      setRebalanceLog(["Projekt wurde erfolgreich in der Cloud gesichert und kann geteilt werden!"]);
+      await setDoc(projectRef, projectData, { merge: true });
+      if (!activeProjectId) setActiveProjectId(projectId); // Aktiviert ab sofort Auto-Save
+      setRebalanceLog(["Projekt wurde gesichert! Ab sofort werden alle Änderungen in diesem Projekt automatisch gespeichert."]);
+      setSyncStatus('saved');
+      setTimeout(() => setSyncStatus(''), 2500);
     } catch (error) {
       console.error("Speicherfehler:", error);
       setRebalanceLog(["Fehler beim Speichern in der Cloud."]);
@@ -280,8 +308,9 @@ export default function App() {
     setPlannerEnd(project.plannerEnd);
     setTargetBudget(project.targetBudget);
     setCampaigns(project.campaigns);
+    setActiveProjectId(project.id); // Verbindet das Projekt, um Auto-Save zu aktivieren
     setIsProjectModalOpen(false);
-    setRebalanceLog(["Projekt erfolgreich aus der Cloud geladen."]);
+    setRebalanceLog([`Projekt "${project.clientName}" geladen. Auto-Save ist aktiv.`]);
   };
 
   const handleDeleteProject = async (id) => {
@@ -289,12 +318,12 @@ export default function App() {
     try {
       const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', id);
       await deleteDoc(projectRef);
+      if (activeProjectId === id) setActiveProjectId(null); // Auto-save deaktivieren wenn aktuelles gelöscht wird
     } catch (error) {
       console.error("Löschfehler:", error);
     }
   };
 
-  // --- KAMPAGNEN HANDLER ---
   const handleDailyBudgetChange = (campId, monthKey, value) => {
     const strVal = value.replace(/[^\d.,]/g, '').replace(',', '.');
     const numValue = parseFloat(strVal);
@@ -367,14 +396,7 @@ export default function App() {
     setTargetBudget(parseInt(val, 10) || 0);
   };
 
-  const getWidthClass = (val) => {
-    const len = String(val).length;
-    if (len >= 5) return 'w-16'; 
-    if (len >= 3) return 'w-12'; 
-    return 'w-10'; 
-  };
-
-  // --- KI-ASSISTENT ---
+  // --- KI-ASSISTENT (GEMINI 2.5 PRO) ---
   const handleAiSubmit = async () => {
     if (!chatInput.trim()) return;
     setIsAiLoading(true);
@@ -435,11 +457,11 @@ export default function App() {
       console.error("AI Assistant Error Details:", error);
       let errorMsg = `Fehler: ${error.message}`;
       if (error.message === "MISSING_API_KEY") {
-         errorMsg = '⚠️ System-Info: Bitte hinterlege deinen API-Key im Quellcode (`const apiKey`), um den KI-Assistenten zu nutzen.';
+         errorMsg = '⚠️ System-Info: Bitte hinterlege deinen Gemini API-Key im Quellcode (`const apiKey`), um den KI-Assistenten zu nutzen.';
       } else if (error.message.includes('403')) {
-         errorMsg = `Zugriff verweigert (Fehler 403). Der API-Schlüssel ist ungültig oder das Modell ist für diesen Key gesperrt. Details: ${error.message}`;
-      } else if (error.message.includes('400')) {
-         errorMsg = `Ungültige Anfrage (Fehler 400). Details: ${error.message}`;
+         errorMsg = `Zugriff verweigert (Fehler 403). Der API-Schlüssel ist ungültig oder das Modell ist gesperrt. Details: ${error.message}`;
+      } else if (error.message.includes('404')) {
+         errorMsg = `Modell nicht gefunden (Fehler 404). Dein Key hat keine Berechtigung für dieses Modell. Details: ${error.message}`;
       }
       setChatHistory(prev => [...prev, { role: 'error', text: errorMsg }]);
     } finally {
@@ -561,6 +583,50 @@ export default function App() {
     ]);
   };
 
+  // --- EXPORT FUNKTIONEN ---
+  const handleExportCSV = () => {
+    const BOM = "\uFEFF"; // Wichtig für Excel und Umlaute
+    let csv = "Markt;Kampagne;Start;Ende;";
+    generatedMonths.forEach(m => csv += `${m.name};`);
+    csv += "Total\n";
+
+    campaigns.forEach(camp => {
+      const campStartStr = camp.startDate || plannerStart;
+      const campEndStr = camp.endDate || plannerEnd;
+      let campTotal = 0;
+      let row = `${camp.market};${camp.name};${formatDateStr(campStartStr)};${formatDateStr(campEndStr)};`;
+
+      generatedMonths.forEach(m => {
+        const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
+        const val = (camp.budgets[m.key] || 0) * cDays;
+        campTotal += val;
+        row += `${val.toFixed(2).replace('.', ',')};`;
+      });
+      row += `${campTotal.toFixed(2).replace('.', ',')}\n`;
+      csv += row;
+    });
+
+    let footer = "SUMME;Tagesbudgets;;;";
+    generatedMonths.forEach(m => {
+      footer += `${totals.monthlyTotals[m.key].toFixed(2).replace('.', ',')};`;
+    });
+    footer += `${totals.grandTotal.toFixed(2).replace('.', ',')}\n`;
+    csv += footer;
+
+    const blob = new Blob([BOM + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Media_Plan_${clientName ? clientName.replace(/[^a-z0-9]/gi, '_') : 'Projekt'}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handlePrintPDF = () => {
+    window.print();
+  };
+
   const totalColumns = 8 + generatedMonths.length;
 
   return (
@@ -579,17 +645,45 @@ export default function App() {
               <h1 className="text-lg sm:text-xl font-black flex items-center gap-2 text-black uppercase tracking-wide">
                 Media Budget Planner
               </h1>
-              <p className="text-xs sm:text-sm text-gray-500">Präzisionsplanung & Dynamische Umverteilung</p>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                {activeProjectId ? (
+                  <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">
+                    <Cloud size={10} strokeWidth={3} /> Cloud Sync aktiv
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-gray-400 bg-gray-50 px-2 py-0.5 rounded-full border border-gray-200">
+                    <CloudOff size={10} strokeWidth={3} /> Lokal (Nicht synchronisiert)
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-2 sm:gap-3 w-full lg:w-auto">
+          <div className="flex flex-wrap gap-2 sm:gap-3 w-full lg:w-auto print-hide">
+            <button onClick={handleExportCSV} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex">
+              <Download size={18} /> <span className="hidden sm:inline">CSV</span>
+            </button>
+            <button onClick={handlePrintPDF} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex">
+              <Printer size={18} /> <span className="hidden sm:inline">PDF</span>
+            </button>
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-black font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors hidden xl:flex">
               {isSidebarOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />} 
               <span className="hidden sm:inline">Assistent</span>
             </button>
-            <button onClick={handleSaveProject} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 border border-gray-300 bg-white text-black hover:bg-gray-50 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex">
-              <Save size={18} /> <span className="hidden sm:inline">Speichern</span>
+            <button 
+              onClick={handleSaveProject} 
+              disabled={syncStatus === 'saving'}
+              className={`flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 border border-gray-300 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex
+                ${syncStatus === 'saving' ? 'bg-gray-50 text-gray-400' : syncStatus === 'saved' ? 'bg-green-50 border-green-300 text-green-700' : 'bg-white text-black hover:bg-gray-50'}
+              `}
+            >
+              {syncStatus === 'saving' ? (
+                <><div className="w-4 h-4 border-2 border-gray-300 border-t-gray-500 rounded-full animate-spin"></div> <span className="hidden sm:inline">Speichert...</span></>
+              ) : syncStatus === 'saved' ? (
+                <><CheckCircle2 size={18} /> <span className="hidden sm:inline">Gespeichert</span></>
+              ) : (
+                <><Save size={18} /> <span className="hidden sm:inline">Speichern</span></>
+              )}
             </button>
             <button onClick={() => setIsProjectModalOpen(true)} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-black text-white hover:bg-gray-800 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm relative flex">
               <FolderOpen size={18} /> <span className="hidden sm:inline">Projekte</span>
@@ -600,7 +694,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* --- BRIEFING BOX (Symmetrisches Mobile-Layout) --- */}
+        {/* --- BRIEFING BOX --- */}
         <div className="bg-white rounded-2xl p-5 sm:p-6 border border-gray-200 relative shadow-sm">
           <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-3">
              <Calendar size={16} className="text-black" />
@@ -608,7 +702,6 @@ export default function App() {
           </div>
           
           <div className="flex flex-col xl:flex-row justify-between gap-8">
-            {/* Symmetrisches Grid für Inputs */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 sm:gap-6 flex-1">
               
               <div className="flex flex-col w-full">
@@ -652,7 +745,6 @@ export default function App() {
 
             </div>
             
-            {/* Live-Total Box */}
             <div className="flex flex-col items-start sm:items-center xl:items-end justify-center pt-5 xl:pt-0 border-t border-gray-100 xl:border-t-0 xl:border-l xl:pl-8">
               <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1 text-left sm:text-center xl:text-right">
                 Gesamtbudget (Tabelle)
@@ -665,9 +757,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* DATUMS-FEHLERMELDUNG */}
         {isInvalidDateRange && (
-          <div className="bg-red-50 text-red-900 p-4 rounded-xl flex items-center gap-3 shadow-sm border border-red-200">
+          <div className="bg-red-50 text-red-900 p-4 rounded-xl flex items-center gap-3 shadow-sm border border-red-200 print-hide">
             <AlertCircle className="text-red-500" />
             <div>
               <h3 className="font-black uppercase tracking-wider text-sm">Ungültiger Zeitraum</h3>
@@ -682,9 +773,8 @@ export default function App() {
             {/* --- MAIN CONTENT --- */}
             <div className={`${isSidebarOpen ? 'xl:col-span-3' : 'xl:col-span-4'} space-y-6 min-w-0`}>
               
-              {/* ALERTS: OVER BUDGET */}
               {budgetExceededBy > 0 && (
-                <div className="bg-red-50 border border-red-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
+                <div className="bg-red-50 border border-red-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm print-hide">
                   <div className="flex items-center gap-3">
                     <div className="bg-red-100 p-2 rounded-full"><AlertCircle className="text-red-600" size={20} /></div>
                     <div>
@@ -700,9 +790,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* ALERTS: UNDER BUDGET (Surplus) */}
               {targetBudget > 0 && budgetExceededBy < 0 && (
-                <div className="bg-green-50 border border-green-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
+                <div className="bg-green-50 border border-green-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm print-hide">
                   <div className="flex items-center gap-3">
                     <div className="bg-green-100 p-2 rounded-full"><ArrowUpCircle className="text-green-600" size={20} /></div>
                     <div>
@@ -718,9 +807,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* ERFOLGSMELDUNG */}
               {rebalanceLog && (
-                <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3 shadow-sm">
+                <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3 shadow-sm print-hide">
                   <Info className="text-blue-600 mt-0.5" size={20} />
                   <div>
                     <h3 className="text-blue-900 font-black uppercase tracking-wider text-sm">Aktion erfolgreich</h3>
@@ -730,38 +818,39 @@ export default function App() {
               )}
 
               {/* TABELLE CONTAINER */}
-              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex flex-col shadow-sm">
+              <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden flex flex-col shadow-md">
                 <div className="overflow-x-auto custom-scrollbar pb-2">
-                  <table className="w-full text-sm text-left whitespace-nowrap table-auto">
+                  <table className="w-full text-sm text-left whitespace-nowrap table-auto border-collapse">
                     
                     {/* HEADER */}
-                    <thead className="bg-gray-50 border-b border-gray-200">
+                    <thead className="bg-gray-200 border-b-2 border-gray-300">
                       <tr>
-                        <th className="px-4 py-4 font-black text-gray-700 sticky left-0 bg-gray-50 z-30 border-r border-gray-200 min-w-[100px] w-[100px]">MARKT</th>
-                        <th className="px-4 py-4 font-black text-gray-700 sticky left-[100px] bg-gray-50 z-30 border-r border-gray-200 min-w-[130px] w-[130px]">KAMPAGNE</th>
-                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-200 text-xs min-w-[120px] w-[120px]">TB (Opt.)</th>
-                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-200 text-xs min-w-[110px] w-[110px]">START</th>
-                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-200 text-xs min-w-[110px] w-[110px]">ENDE</th>
-                        <th className="px-1 py-4 border-r border-gray-200 text-center min-w-[36px] w-[36px]" title="Auf globalen Zeitraum zurücksetzen"></th>
+                        <th className="px-4 py-4 font-black text-gray-800 sticky left-0 bg-gray-200 z-40 border-r border-gray-300 min-w-[100px] w-[100px]">MARKT</th>
+                        <th className="px-4 py-4 font-black text-gray-800 sticky left-[100px] bg-gray-200 z-40 border-r border-gray-300 min-w-[130px] w-[130px]">KAMPAGNE</th>
+                        
+                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[120px] w-[120px]">TB (Opt.)</th>
+                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[110px] w-[110px]">START</th>
+                        <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[110px] w-[110px]">ENDE</th>
+                        <th className="px-1 py-4 border-r border-gray-300 text-center min-w-[36px] w-[36px] print-hide" title="Auf globalen Zeitraum zurücksetzen"></th>
                         {generatedMonths.map((m) => {
                           const isPast = m.actualEndStr < referenceDate;
                           return (
-                            <th key={`head-${m.key}`} className={`px-2 py-3 text-center border-r border-gray-200 min-w-[90px] ${isPast ? 'text-gray-400' : 'text-gray-700'}`}>
+                            <th key={`head-${m.key}`} className={`px-2 py-3 text-center border-r border-gray-300 min-w-[100px] ${isPast ? 'text-gray-400' : 'text-gray-800'}`}>
                               <div className="text-[10px] font-bold text-gray-400 leading-none mb-1.5">{m.days} T.</div>
                               <div className="font-black">{m.name}</div>
                             </th>
                           );
                         })}
-                        <th className="px-4 py-4 font-black text-black text-right bg-gray-100 border-l border-gray-200 min-w-[100px]">TOT.</th>
-                        <th className="px-3 py-3 text-center w-12"></th>
+                        <th className="px-4 py-4 font-black text-black text-right bg-gray-200 border-l-2 border-gray-300 min-w-[120px]">TOT.</th>
+                        <th className="px-3 py-3 text-center bg-gray-200 w-12 print-hide"></th>
                       </tr>
                     </thead>
 
                     {/* --- SEKTION 1: TAGESBUDGETS --- */}
                     <tbody>
                       <tr>
-                        <td colSpan={totalColumns} className="bg-gray-100 p-0 border-b border-gray-200">
-                          <div className="sticky left-0 px-4 py-2.5 text-black font-black text-xs uppercase tracking-widest inline-block">
+                        <td colSpan={totalColumns} className="bg-gray-100 p-0 border-b-2 border-gray-300">
+                          <div className="sticky left-0 px-4 py-3 text-black font-black text-xs uppercase tracking-widest inline-block bg-gray-100 z-30">
                             Tagesbudgets (Editierbar)
                           </div>
                         </td>
@@ -779,21 +868,22 @@ export default function App() {
                          });
                          
                          const avgTb = totalActiveDays > 0 ? campTotal / totalActiveDays : 0;
-                         const displayTb = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(avgTb);
+                         const rowBg = rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-100';
 
                          return (
-                          <tr key={`tb-${camp.id}`} className={`${rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} border-b border-gray-100 hover:bg-gray-100 transition-colors group`}>
-                            <td className="px-4 py-2 text-black sticky left-0 z-10 border-r border-gray-200 bg-inherit">
+                          <tr key={`tb-${camp.id}`} className={`${rowBg} border-b border-gray-300 hover:bg-blue-50 transition-colors group`}>
+                            <td className={`px-4 py-2 text-black sticky left-0 z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>
                               <input type="text" value={camp.market} onChange={(e) => handleCampaignEdit(camp.id, 'market', e.target.value)} className="w-full bg-transparent font-bold outline-none focus:border-b focus:border-black" placeholder="Markt" />
                             </td>
-                            <td className="px-4 py-2 font-black text-black sticky left-[100px] z-10 border-r border-gray-200 bg-inherit">
+                            <td className={`px-4 py-2 font-black text-black sticky left-[100px] z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>
                               <input type="text" value={camp.name} onChange={(e) => handleCampaignEdit(camp.id, 'name', e.target.value)} className="w-full bg-transparent outline-none focus:border-b focus:border-black" placeholder="Kampagnenname" />
                             </td>
-                            <td className="px-2 py-2 border-r border-gray-200 align-middle bg-gray-50">
+                            
+                            <td className={`px-2 py-2 border-r border-gray-300 align-middle ${rIdx % 2 === 0 ? 'bg-gray-50' : 'bg-gray-100'} group-hover:bg-blue-50 transition-colors`}>
                               <div className="relative flex items-center justify-end w-full">
                                 <input 
                                   type="text" 
-                                  value={activeTotalInput.id === camp.id ? activeTotalInput.value : (avgTb === 0 ? '' : displayTb)} 
+                                  value={activeTotalInput.id === camp.id ? activeTotalInput.value : (avgTb === 0 ? '' : formatNumber(avgTb))} 
                                   onChange={(e) => setActiveTotalInput({ id: camp.id, value: e.target.value })} 
                                   onBlur={() => {
                                     if (activeTotalInput.id === camp.id) {
@@ -808,13 +898,13 @@ export default function App() {
                                 <span className="absolute right-1 text-[10px] font-bold text-gray-400">€</span>
                               </div>
                             </td>
-                            <td className="px-2 py-2 border-r border-gray-200 align-middle">
+                            <td className="px-2 py-2 border-r border-gray-300 align-middle">
                               <input type="date" value={camp.startDate} onChange={(e) => handleCampaignEdit(camp.id, 'startDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
                             </td>
-                            <td className="px-2 py-2 border-r border-gray-200 align-middle">
+                            <td className="px-2 py-2 border-r border-gray-300 align-middle">
                               <input type="date" value={camp.endDate} onChange={(e) => handleCampaignEdit(camp.id, 'endDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
                             </td>
-                            <td className="px-1 py-2 border-r border-gray-200 align-middle text-center bg-gray-50/30">
+                            <td className="px-1 py-2 border-r border-gray-300 align-middle text-center print-hide">
                               <button 
                                 onClick={() => setCampaignToFullRuntime(camp.id)} 
                                 className="p-1.5 text-gray-400 hover:bg-gray-200 hover:text-black rounded-lg transition-colors mx-auto flex items-center justify-center"
@@ -823,23 +913,37 @@ export default function App() {
                                 <RotateCcw size={14} strokeWidth={2.5} />
                               </button>
                             </td>
+                            
                             {generatedMonths.map((m) => {
                               const isPast = m.actualEndStr < referenceDate;
                               const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
                               const isActive = cDays > 0;
                               const val = camp.budgets[m.key] || 0;
+                              
+                              const isCurrentlyActiveInput = activeDailyInput.id === camp.id && activeDailyInput.month === m.key;
+                              
                               return (
-                                <td key={`tb-${camp.id}-${m.key}`} className={`p-1.5 border-r border-gray-100 text-center ${isPast ? 'bg-gray-50/50' : (!isActive ? 'bg-gray-50/30' : '')}`}>
+                                <td key={`tb-${camp.id}-${m.key}`} className={`p-1.5 border-r border-gray-200 text-center ${isPast ? 'bg-gray-100/50' : ''}`}>
                                   {isActive ? (
                                     <div className="flex items-center justify-center">
                                       <input
-                                        type="number" step="0.01" value={val === 0 ? '' : val} onChange={(e) => handleDailyBudgetChange(camp.id, m.key, e.target.value)} placeholder="-"
-                                        className={`${getWidthClass(val)} text-center px-1.5 py-1.5 rounded-md text-sm font-bold outline-none transition-all duration-200
-                                          ${isPast ? 'bg-transparent text-gray-500 border border-transparent hover:border-gray-300 focus:border-gray-400' : 'bg-white border border-gray-200 hover:border-black focus:border-black focus:ring-1 focus:ring-black text-black shadow-sm'}
+                                        type="text"
+                                        value={isCurrentlyActiveInput ? activeDailyInput.value : (val === 0 ? '' : formatNumber(val))}
+                                        onChange={(e) => setActiveDailyInput({ id: camp.id, month: m.key, value: e.target.value })}
+                                        onBlur={() => {
+                                          if (isCurrentlyActiveInput) {
+                                            handleDailyBudgetChange(camp.id, m.key, activeDailyInput.value);
+                                            setActiveDailyInput({ id: null, month: null, value: '' });
+                                          }
+                                        }}
+                                        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                                        placeholder="-"
+                                        className={`min-w-[64px] w-full max-w-[80px] text-center px-1.5 py-1.5 rounded-md text-sm font-bold outline-none transition-all duration-200
+                                          ${isPast ? 'bg-transparent text-gray-500 border border-transparent' : 'bg-white border border-gray-300 hover:border-black focus:border-black focus:ring-1 focus:ring-black text-black shadow-sm'}
                                         `}
                                       />
                                       <span className={`text-[11px] font-bold ml-1 ${isPast ? 'text-gray-400' : 'text-gray-600'}`}>€</span>
-                                      {cDays < m.days && <span className="text-[9px] font-bold text-blue-400 ml-1" title={`${cDays} aktive Tage`}>({cDays}T)</span>}
+                                      {cDays < m.days && <span className="text-[9px] font-bold text-blue-400 ml-1 print-hide" title={`${cDays} aktive Tage`}>({cDays}T)</span>}
                                     </div>
                                   ) : (
                                     <span className="text-gray-300 text-xs">-</span>
@@ -847,14 +951,14 @@ export default function App() {
                                 </td>
                               );
                             })}
-                            <td className="px-4 py-2 border-l border-gray-200 bg-gray-50 text-right font-black text-gray-800">
+                            <td className="px-4 py-2 border-l-2 border-gray-300 bg-gray-50 text-right font-black text-gray-800 group-hover:bg-blue-100 transition-colors">
                                {formatCurrency(campTotal)}
                             </td>
-                            <td className="px-2 py-2 text-center bg-white flex items-center justify-center gap-1 h-full min-h-[44px]">
-                              <button onClick={() => handleDuplicateCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-blue-50 hover:text-blue-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne duplizieren (Boost)">
+                            <td className="px-2 py-2 text-center flex items-center justify-center gap-1 h-full min-h-[44px] print-hide">
+                              <button onClick={() => handleDuplicateCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-blue-100 hover:text-blue-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne duplizieren (Boost)">
                                 <Copy size={16} />
                               </button>
-                              <button onClick={() => handleDeleteCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne löschen">
+                              <button onClick={() => handleDeleteCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-red-100 hover:text-red-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne löschen">
                                 <Trash2 size={16} />
                               </button>
                             </td>
@@ -863,32 +967,32 @@ export default function App() {
                       })}
 
                       {/* --- SUMME TAGESBUDGETS --- */}
-                      <tr className="bg-gray-100 border-t border-gray-300">
-                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-0 z-20 bg-gray-100 border-r border-gray-200">SUMME</td>
-                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-[100px] z-20 bg-gray-100 border-r border-gray-200">Tagesbudgets</td>
-                        <td className="border-r border-gray-200 bg-gray-100"></td>
-                        <td className="border-r border-gray-200 bg-gray-100"></td>
-                        <td className="border-r border-gray-200 bg-gray-100"></td>
-                        <td className="border-r border-gray-200 bg-gray-100"></td>
+                      <tr className="bg-gray-200 border-t-2 border-b-2 border-gray-300">
+                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-0 z-20 bg-gray-200 border-r border-gray-300">SUMME</td>
+                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-[100px] z-20 bg-gray-200 border-r border-gray-300">Tagesbudgets</td>
+                        <td className="border-r border-gray-300 bg-gray-200"></td>
+                        <td className="border-r border-gray-300 bg-gray-200"></td>
+                        <td className="border-r border-gray-300 bg-gray-200"></td>
+                        <td className="border-r border-gray-300 bg-gray-200 print-hide"></td>
                         {generatedMonths.map(m => {
                           let sum = 0;
                           campaigns.forEach(c => sum += (c.budgets[m.key] || 0));
                           return (
-                             <td key={`sum-${m.key}`} className="px-1 py-3.5 text-center border-r border-gray-200 font-black text-gray-700 bg-gray-100">
+                             <td key={`sum-${m.key}`} className="px-2 py-3.5 text-center border-r border-gray-300 font-black text-gray-800 bg-gray-200">
                                {sum > 0 ? formatCurrency(sum) : '-'}
                              </td>
                           );
                         })}
-                        <td className="px-4 py-3.5 border-l border-gray-200 bg-gray-100 text-right font-black text-black">
+                        <td className="px-4 py-3.5 border-l-2 border-gray-300 bg-gray-200 text-right font-black text-black">
                           {formatCurrency(totals.grandTotal)}
                         </td>
-                        <td className="px-2 py-2 bg-gray-100"></td>
+                        <td className="px-2 py-2 bg-gray-200 print-hide"></td>
                       </tr>
 
                       {/* --- KAMPAGNE HINZUFÜGEN BUTTON --- */}
-                      <tr>
-                        <td colSpan={totalColumns} className="bg-white p-0 border-t border-gray-200">
-                           <div className="sticky left-0 inline-block p-4">
+                      <tr className="print-hide">
+                        <td colSpan={totalColumns} className="bg-white p-0 border-b border-gray-300">
+                           <div className="sticky left-0 inline-block p-4 z-10">
                               <button onClick={handleAddCampaign} className="text-xs font-black uppercase tracking-wider text-black bg-white hover:bg-gray-50 px-4 py-2 border border-gray-300 rounded-lg transition-colors shadow-sm flex items-center gap-2">
                                 <Plus size={16} strokeWidth={2.5} /> Kampagne hinzufügen
                               </button>
@@ -900,8 +1004,8 @@ export default function App() {
                     {/* --- SEKTION 2: GESAMTBUDGETS --- */}
                     <tbody>
                       <tr>
-                        <td colSpan={totalColumns} className="bg-gray-100 p-0 border-t border-gray-200 border-b border-gray-200">
-                           <div className="sticky left-0 px-4 py-2.5 text-black font-black text-xs uppercase tracking-widest inline-block">
+                        <td colSpan={totalColumns} className="bg-gray-100 p-0 border-b-2 border-gray-300">
+                           <div className="sticky left-0 px-4 py-3 text-black font-black text-xs uppercase tracking-widest inline-block bg-gray-100 z-30">
                               Monats- & Gesamtbudgets (Berechnet)
                            </div>
                         </td>
@@ -910,52 +1014,53 @@ export default function App() {
                         let campTotal = 0;
                         const campStartStr = camp.startDate || plannerStart;
                         const campEndStr = camp.endDate || plannerEnd;
+                        const rowBg = rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-100';
 
                         return (
-                          <tr key={`tot-${camp.id}`} className={`${rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} border-b border-gray-100 hover:bg-gray-50`}>
-                            <td className="px-4 py-3 font-bold text-gray-700 text-left sticky left-0 z-10 border-r border-gray-200 bg-inherit">{camp.market}</td>
-                            <td className="px-4 py-3 font-black text-gray-900 text-left sticky left-[100px] z-10 border-r border-gray-200 bg-inherit">{camp.name}</td>
-                            <td className="px-2 py-3 border-r border-gray-200 text-xs font-bold text-gray-500"></td>
-                            <td className="px-2 py-3 border-r border-gray-200 text-[11px] font-bold text-gray-500">{formatDateStr(camp.startDate)}</td>
-                            <td className="px-2 py-3 border-r border-gray-200 text-[11px] font-bold text-gray-500">{formatDateStr(camp.endDate)}</td>
-                            <td className="px-1 py-3 border-r border-gray-200"></td>
+                          <tr key={`tot-${camp.id}`} className={`${rowBg} border-b border-gray-300 hover:bg-blue-50 transition-colors group`}>
+                            <td className={`px-4 py-3 font-bold text-gray-700 text-left sticky left-0 z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>{camp.market}</td>
+                            <td className={`px-4 py-3 font-black text-gray-900 text-left sticky left-[100px] z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>{camp.name}</td>
+                            <td className="px-2 py-3 border-r border-gray-300 text-xs font-bold text-gray-500"></td>
+                            <td className="px-2 py-3 border-r border-gray-300 text-[11px] font-bold text-gray-500">{formatDateStr(camp.startDate)}</td>
+                            <td className="px-2 py-3 border-r border-gray-300 text-[11px] font-bold text-gray-500">{formatDateStr(camp.endDate)}</td>
+                            <td className="px-1 py-3 border-r border-gray-300 print-hide"></td>
                             {generatedMonths.map((m) => {
                               const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
                               const val = camp.budgets[m.key] || 0;
                               const monthBudget = val * cDays;
                               campTotal += monthBudget;
                               return (
-                                <td key={`tot-${camp.id}-${m.key}`} className={`px-3 py-3 text-center border-r border-gray-100 ${monthBudget === 0 ? 'text-gray-300' : 'text-gray-700 font-medium'}`}>
+                                <td key={`tot-${camp.id}-${m.key}`} className={`px-3 py-3 text-center border-r border-gray-200 ${monthBudget === 0 ? 'text-gray-300' : 'text-gray-800 font-bold'}`}>
                                   {monthBudget === 0 ? '-' : formatCurrency(monthBudget)}
                                 </td>
                               );
                             })}
-                            <td className="px-4 py-3 font-black text-black text-right bg-gray-50 border-l border-gray-200">
+                            <td className="px-4 py-3 font-black text-black text-right bg-gray-50 border-l-2 border-gray-300 group-hover:bg-blue-100 transition-colors">
                               {formatCurrency(campTotal)}
                             </td>
-                            <td className="px-2 py-3 text-center"></td>
+                            <td className="px-2 py-3 text-center print-hide"></td>
                           </tr>
                         );
                       })}
                     </tbody>
                     
-                    <tfoot className="bg-white border-t border-gray-300">
+                    <tfoot className="bg-white border-t-2 border-gray-400 shadow-t-md">
                       <tr>
-                        <td className="px-4 py-4 font-black uppercase tracking-widest text-black text-left sticky left-0 z-20 bg-gray-50 border-r border-gray-200">GESAMT</td>
-                        <td className="px-4 py-4 font-black uppercase tracking-widest text-black text-left sticky left-[100px] z-20 bg-gray-50 border-r border-gray-200">BUDGET</td>
-                        <td className="border-r border-gray-200 bg-gray-50"></td>
-                        <td className="border-r border-gray-200 bg-gray-50"></td>
-                        <td className="border-r border-gray-200 bg-gray-50"></td>
-                        <td className="border-r border-gray-200 bg-gray-50"></td>
+                        <td className="px-4 py-5 font-black uppercase tracking-widest text-black text-left sticky left-0 z-30 bg-gray-200 border-r border-gray-300">GESAMT</td>
+                        <td className="px-4 py-5 font-black uppercase tracking-widest text-black text-left sticky left-[100px] z-30 bg-gray-200 border-r border-gray-300">BUDGET</td>
+                        <td className="border-r border-gray-300 bg-gray-200"></td>
+                        <td className="border-r border-gray-300 bg-gray-200"></td>
+                        <td className="border-r border-gray-300 bg-gray-200"></td>
+                        <td className="border-r border-gray-300 bg-gray-200 print-hide"></td>
                         {generatedMonths.map((m) => (
-                          <td key={`foot-${m.key}`} className="px-3 py-4 text-center font-black text-gray-800 border-r border-gray-200 bg-gray-50">
+                          <td key={`foot-${m.key}`} className="px-3 py-5 text-center font-black text-black border-r border-gray-300 bg-gray-200">
                             {formatCurrency(totals.monthlyTotals[m.key])}
                           </td>
                         ))}
-                        <td className={`px-4 py-4 font-black text-right border-l border-gray-300 text-lg ${budgetExceededBy > 0 ? 'bg-red-50 text-red-600' : 'bg-black text-white'} rounded-br-2xl`}>
+                        <td className={`px-4 py-5 font-black text-right border-l-2 border-gray-300 text-xl ${budgetExceededBy > 0 ? 'bg-red-50 text-red-600' : 'bg-black text-white'} rounded-br-2xl`}>
                           {formatCurrency(totals.grandTotal)}
                         </td>
-                        <td></td>
+                        <td className="bg-gray-200 print-hide"></td>
                       </tr>
                     </tfoot>
                   </table>
@@ -966,7 +1071,7 @@ export default function App() {
 
             {/* --- SIDEBAR: KI ASSISTENT & VERTEILUNG --- */}
             {isSidebarOpen && (
-              <div className="xl:col-span-1 space-y-6">
+              <div className="xl:col-span-1 space-y-6 print-hide">
                 
                 {/* MARKET SHARES WIDGET */}
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
@@ -1055,7 +1160,7 @@ export default function App() {
                       </button>
                     </div>
                     <div className="text-[9px] font-bold text-gray-400 mt-2 text-center uppercase tracking-widest">
-                      Powered by Gemini AI
+                      Powered by Gemini AI (2.5 Pro)
                     </div>
                   </div>
                   
@@ -1077,7 +1182,7 @@ export default function App() {
              <div className="p-6 overflow-y-auto flex-1 bg-white">
                 <p className="text-xs text-gray-500 font-medium mb-6 bg-blue-50 text-blue-800 p-3 rounded-xl border border-blue-100 flex items-start gap-2">
                    <Info size={16} className="mt-0.5 shrink-0" />
-                   Diese Projekte werden sicher in der Cloud gespeichert. Alle Mitarbeiter mit Zugriff auf das Tool sehen diesen aktuellen Stand.
+                   Diese Projekte werden sicher in der Cloud gespeichert. Sobald du eines lädst, ist das <strong>Auto-Save</strong> aktiv.
                 </p>
                 {savedProjects.length === 0 ? (
                    <div className="text-center py-12 border-2 border-dashed border-gray-200 rounded-2xl text-gray-400 font-bold bg-gray-50/50">
@@ -1086,15 +1191,17 @@ export default function App() {
                 ) : (
                    <div className="space-y-4">
                       {savedProjects.map((proj) => (
-                         <div key={proj.id} className="bg-white border border-gray-200 rounded-xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 hover:shadow-md transition-shadow group">
+                         <div key={proj.id} className={`bg-white border ${activeProjectId === proj.id ? 'border-black ring-1 ring-black shadow-md' : 'border-gray-200 hover:shadow-md'} rounded-xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 transition-all group`}>
                             <div>
                                <h3 className="font-black text-black text-lg flex items-center gap-2">
-                                 <User size={16} className="text-gray-400" /> {proj.clientName}
+                                 <User size={16} className={`${activeProjectId === proj.id ? 'text-green-500' : 'text-gray-400'}`} /> 
+                                 {proj.clientName}
+                                 {activeProjectId === proj.id && <span className="ml-2 bg-black text-white text-[9px] px-2 py-0.5 rounded-full uppercase tracking-widest">Aktiv</span>}
                                </h3>
                                <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mt-1.5 flex items-center gap-1.5">
                                   <Calendar size={12} /> {formatDateStr(proj.plannerStart)} — {formatDateStr(proj.plannerEnd)}
                                </p>
-                               <p className="text-[10px] text-gray-400 mt-2">Gespeichert am: {proj.timestamp}</p>
+                               <p className="text-[10px] text-gray-400 mt-2">Letzte Änderung: {proj.timestamp}</p>
                             </div>
                             <div className="flex items-center gap-4 sm:gap-6 w-full sm:w-auto">
                                <div className="text-right flex-1 sm:flex-none bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-100">
@@ -1104,9 +1211,10 @@ export default function App() {
                                <div className="flex flex-col gap-2">
                                  <button 
                                    onClick={() => handleLoadProject(proj)}
-                                   className="px-4 py-2 bg-black text-white hover:bg-gray-800 rounded-lg font-bold uppercase text-[10px] tracking-wider shadow-sm transition-colors"
+                                   disabled={activeProjectId === proj.id}
+                                   className={`px-4 py-2 rounded-lg font-bold uppercase text-[10px] tracking-wider shadow-sm transition-colors ${activeProjectId === proj.id ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-black text-white hover:bg-gray-800'}`}
                                  >
-                                   Laden
+                                   {activeProjectId === proj.id ? 'Geöffnet' : 'Laden'}
                                  </button>
                                  <button 
                                    onClick={() => handleDeleteProject(proj.id)}
@@ -1130,6 +1238,17 @@ export default function App() {
         .custom-scrollbar::-webkit-scrollbar-track { background: #f8fafc; border-radius: 8px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; border: 2px solid #f8fafc; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        @media print {
+          body { background: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .print-hide { display: none !important; }
+          .custom-scrollbar { overflow: visible !important; }
+          table { width: 100% !important; font-size: 10px !important; }
+          /* Entfernt den "Sticky" Effekt, damit beim Scrollen nichts überlappt auf dem Papier */
+          .sticky { position: static !important; }
+          /* Sorgt dafür, dass es bevorzugt quer (Landscape) gedruckt wird */
+          @page { size: landscape; margin: 1cm; }
+        }
       `}} />
     </div>
   );
