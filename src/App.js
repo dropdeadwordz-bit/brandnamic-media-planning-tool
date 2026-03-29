@@ -384,7 +384,7 @@ export default function App() {
 
     try {
       // 🔴🔴🔴 HIER DEINEN GEMINI API KEY EINTRAGEN 🔴🔴🔴
-      const apiKey = "AIzaSyCVLNFNK9YFLfVWGWr0xXR86jZUPT430r8"; 
+      const apiKey = "AIzaSyBUNskeoCxw6xBIpRRsKZ7ApoSUUxstPa4"; 
       // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
       
       if (!apiKey) throw new Error("MISSING_API_KEY");
@@ -419,7 +419,7 @@ export default function App() {
       };
 
       const data = await fetchWithBackoff(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-002:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:generateContent?key=${apiKey}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
       );
 
