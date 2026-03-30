@@ -56,26 +56,6 @@ const getDaysOverlap = (start1Str, end1Str, start2Str, end2Str) => {
   return Math.floor((end - start) / 86400000) + 1;
 };
 
-const fetchWithBackoff = async (url, options, maxRetries = 5) => {
-  const delays = [1000, 2000, 4000, 8000, 16000];
-  for (let i = 0; i <= maxRetries; i++) {
-    try {
-      const response = await fetch(url, options);
-      if (!response.ok) {
-        const errText = await response.text();
-        if (response.status === 403 || response.status === 400 || response.status === 401) {
-           throw new Error(`Client Error ${response.status}: ${errText}`);
-        }
-        throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
-      }
-      return await response.json();
-    } catch (e) {
-      if (i === maxRetries || e.message.includes('Client Error')) throw e;
-      await new Promise(resolve => setTimeout(resolve, delays[i]));
-    }
-  }
-};
-
 // Start-Template
 const currentYear = new Date().getFullYear();
 const generateInitialState = () => {
@@ -441,6 +421,7 @@ export default function App() {
     setTargetBudget(parseInt(val, 10) || 0);
   };
 
+  // --- REPARIERTER KI-ASSISTENT (Inlined Fetch für Canvas Interceptor) ---
   const handleAiSubmit = async () => {
     if (!chatInput.trim()) return;
     setIsAiLoading(true);
@@ -449,43 +430,108 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
-      const apiKey = process.env.REACT_APP_GEMINI_API_KEY; 
-      if (!apiKey) throw new Error("MISSING_API_KEY");
+      const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
+      const systemPrompt = `Du bist der KI-Planungsassistent für den "Media Budget Planner".
+Deine Aufgabe ist es, die Text-Anweisungen des Users in aktualisierte Kampagnendaten zu übersetzen.
+WICHTIGER KONTEXT:
+- Geplanter globaler Zeitraum: ${plannerStart} bis ${plannerEnd}
+- Aktuelles Zielbudget: ${targetBudget}€
+- Aktuelle Kampagnenstruktur: ${JSON.stringify(campaigns)}
+- Stichtag (Heute): ${referenceDate}
 
-      const systemPrompt = `
-        Du bist der KI-Planungsassistent für den "Media Budget Planner".
-        Deine Aufgabe ist es, die Text-Anweisungen des Users in aktualisierte Kampagnendaten (JSON) zu übersetzen.
-      `;
+REGELN:
+1. Analysiere die Anfrage des Users.
+2. Wenn Budgets geändert werden sollen, passe die entsprechenden Monate in "budgets" an.
+3. Wenn neue Kampagnen erstellt werden sollen, füge sie hinzu.
+4. Gib IMMER ein gültiges JSON-Objekt zurück, das exakt dem geforderten Schema entspricht.
+5. Das Feld "reply" MUSS eine kurze, freundliche Bestätigung auf Deutsch enthalten.`;
 
       const payload = {
         contents: [{ parts: [{ text: userMessage }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { responseMimeType: "application/json" }
+        generationConfig: { 
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              reply: { type: "STRING" },
+              newTargetBudget: { type: "NUMBER" },
+              newCampaigns: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    id: { type: "STRING" },
+                    market: { type: "STRING" },
+                    name: { type: "STRING" },
+                    startDate: { type: "STRING" },
+                    endDate: { type: "STRING" },
+                    budgets: { type: "OBJECT" }
+                  }
+                }
+              }
+            },
+            required: ["reply", "newCampaigns"]
+          }
+        }
       };
 
-      const data = await fetchWithBackoff(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
-      );
+      let data = null;
+      let success = false;
+      let lastError = null;
+      const delays = [1000, 2000, 4000, 8000, 16000];
+      
+      // Clevere Warteschleife direkt hier, damit Canvas den "fetch" Call sauber sieht
+      for (let i = 0; i <= 5; i++) {
+        try {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+            { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/json' }, 
+              body: JSON.stringify(payload) 
+            }
+          );
 
-      let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-      rawText = rawText.replace(/```json/ig, '').replace(/```/g, '').trim();
-      const result = JSON.parse(rawText);
+          if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`HTTP Error ${response.status}: ${errText}`);
+          }
+
+          data = await response.json();
+          success = true;
+          break;
+        } catch (err) {
+          lastError = err;
+          if (i < 5) await new Promise(resolve => setTimeout(resolve, delays[i]));
+        }
+      }
+
+      if (!success) {
+        throw lastError;
+      }
+
+      let rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+      let result = {};
+      try {
+        result = JSON.parse(rawText);
+      } catch(e) {
+        console.error("JSON Parse Error:", rawText);
+        throw new Error("Die KI hat eine ungültige Antwort geliefert.");
+      }
       
       if (result.newCampaigns && Array.isArray(result.newCampaigns)) {
         saveToHistory(campaigns);
         setCampaigns(result.newCampaigns);
       }
-      if (result.newTargetBudget && typeof result.newTargetBudget === 'number') setTargetBudget(result.newTargetBudget);
-      setChatHistory(prev => [...prev, { role: 'ai', text: result.reply }]);
+      if (result.newTargetBudget !== undefined) setTargetBudget(result.newTargetBudget);
+      
+      const finalReply = result.reply || "Die gewünschten Änderungen wurden übernommen.";
+      setChatHistory(prev => [...prev, { role: 'ai', text: finalReply }]);
 
     } catch (error) {
       console.error("AI Assistant Error Details:", error);
-      let errorMsg = `Fehler: ${error.message}`;
-      if (error.message === "MISSING_API_KEY") {
-         errorMsg = '⚠️ System-Info: Bitte hinterlege deinen Gemini API-Key, um den KI-Assistenten zu nutzen.';
-      }
-      setChatHistory(prev => [...prev, { role: 'error', text: errorMsg }]);
+      setChatHistory(prev => [...prev, { role: 'error', text: `Ein Verbindungsfehler ist aufgetreten. (Stelle sicher, dass du in der Vorschau-Umgebung bist, oder einen eigenen API-Key bei Vercel hinterlegt hast).` }]);
     } finally {
       setIsAiLoading(false);
     }
@@ -574,9 +620,9 @@ export default function App() {
           for (let i = 0; i < slots.length; i++) {
              let cost = Math.round(0.01 * slots[i].activeDays * 100) / 100;
              if (gap >= cost) {
-                updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] = Math.round((updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] + 0.01) * 100) / 100;
-                gap = Math.round((gap - cost) * 100) / 100;
-                added = true;
+                 updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] = Math.round((updatedCampaigns[slots[i].cIdx].budgets[slots[i].mKey] + 0.01) * 100) / 100;
+                 gap = Math.round((gap - cost) * 100) / 100;
+                 added = true;
              }
           }
        }
@@ -644,32 +690,28 @@ export default function App() {
     document.body.removeChild(link);
   };
 
-  // --- NATIVE BROWSER PDF LOGIK ---
-  const handlePrintPDF = async () => {
+  const handlePrintPDF = () => {
     setIsPdfGenerating(true); 
     
-    // Warten, bis React alle Inputs in sauberen Text umgewandelt und Sticky-Klassen entfernt hat
-    await new Promise(resolve => setTimeout(resolve, 400));
-
-    try {
-      // Nutzt die native, fehlerfreie Druck-Engine des Browsers
-      window.print();
-      setRebalanceLog(["Druck-Dialog geöffnet. Bitte als Ziel 'Als PDF speichern' wählen."]);
-    } catch (error) {
-      console.error("Print Error:", error);
-      setRebalanceLog(["Fehler beim Öffnen des Druck-Dialogs."]);
-    } finally {
-      // Nach dem Druckdialog sofort wieder zur interaktiven Ansicht wechseln
-      setIsPdfGenerating(false); 
-    }
+    // Wir warten großzügig, bis React wirklich JEDES <input> Feld in ein <div> umgewandelt hat
+    setTimeout(() => {
+      try {
+        window.print();
+        setRebalanceLog(["Druck-Dialog geöffnet. Bitte als Ziel 'Als PDF speichern' wählen."]);
+      } catch (error) {
+        console.error("Print Error:", error);
+        setRebalanceLog(["Fehler beim Öffnen des Druck-Dialogs."]);
+      } finally {
+        setIsPdfGenerating(false); 
+      }
+    }, 500); // 500 Millisekunden reichen völlig aus
   };
 
   const totalColumns = 8 + generatedMonths.length;
 
   return (
     <div className="min-h-screen bg-[#f8fafc] text-gray-900 p-3 sm:p-6 font-sans selection:bg-black selection:text-white">
-      {/* 🛠️ Container für den Druck optimiert (100% Breite statt w-max) */}
-      <div className={`mx-auto space-y-6 ${isPdfGenerating ? 'w-full max-w-none px-0' : 'max-w-[1900px]'}`} id="pdf-export-area">
+      <div className={`mx-auto space-y-6 ${isPdfGenerating ? 'pdf-render-mode w-full max-w-none px-0' : 'max-w-[1900px]'}`} id="pdf-export-area">
         
         {/* --- HEADER --- */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 sm:p-6 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-5">
@@ -737,7 +779,7 @@ export default function App() {
         </div>
 
         {/* --- BRIEFING BOX --- */}
-        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-gray-200 relative shadow-sm break-inside-avoid" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-gray-200 relative shadow-sm break-inside-avoid">
           <div className="flex items-center justify-between mb-6 border-b border-gray-100 pb-3">
              <div className="flex items-center gap-2">
                <Calendar size={16} className="text-black" />
@@ -882,7 +924,6 @@ export default function App() {
               )}
 
               {/* TABELLE CONTAINER */}
-              {/* 🛠️ WICHTIG: overflows werden komplett entfernt während isPdfGenerating */}
               <div className={`bg-white rounded-2xl border border-gray-300 flex flex-col shadow-md ${isPdfGenerating ? '' : 'overflow-hidden'}`}>
                 <div className={`${isPdfGenerating ? '' : 'overflow-x-auto custom-scrollbar'} pb-2`}>
                   <table className="w-full text-sm text-left whitespace-nowrap table-auto border-collapse">
@@ -890,7 +931,6 @@ export default function App() {
                     {/* HEADER */}
                     <thead className="bg-gray-200 border-b-2 border-gray-300">
                       <tr>
-                        {/* 🛠️ Sticky CSS Klassen werden dynamisch auf '' (leer) gesetzt während PDF Export! */}
                         <th className={`px-4 py-4 font-black text-black uppercase tracking-wider text-xs bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-0 z-30'}`}>Markt</th>
                         <th className={`px-4 py-4 font-black text-black uppercase tracking-wider text-xs bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-[100px] z-30'}`}>Kampagne</th>
                         <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[120px] w-[120px]">TB (Opt.)</th>
@@ -940,7 +980,7 @@ export default function App() {
                             
                             <td className={`px-4 py-2 text-black border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors ${isPdfGenerating ? '' : 'sticky left-0 z-20'}`}>
                               {isPdfGenerating ? (
-                                <div className="font-bold py-1 whitespace-normal break-words">{camp.market || '-'}</div>
+                                <div className="font-bold py-1 whitespace-normal break-words min-h-[32px] flex items-center">{camp.market || '-'}</div>
                               ) : (
                                 <input type="text" value={camp.market} onChange={(e) => handleCampaignEdit(camp.id, 'market', e.target.value)} className="w-full bg-transparent font-bold outline-none focus:border-b focus:border-black" placeholder="Markt" />
                               )}
@@ -948,7 +988,7 @@ export default function App() {
                             
                             <td className={`px-4 py-2 font-black text-black border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors ${isPdfGenerating ? '' : 'sticky left-[100px] z-20'}`}>
                               {isPdfGenerating ? (
-                                <div className="font-black py-1 whitespace-normal break-words">{camp.name || '-'}</div>
+                                <div className="font-black py-1 whitespace-normal break-words min-h-[32px] flex items-center">{camp.name || '-'}</div>
                               ) : (
                                 <input type="text" value={camp.name} onChange={(e) => handleCampaignEdit(camp.id, 'name', e.target.value)} className="w-full bg-transparent outline-none focus:border-b focus:border-black" placeholder="Kampagnenname" />
                               )}
@@ -957,7 +997,7 @@ export default function App() {
                             <td className={`px-2 py-2 border-r border-gray-300 align-middle ${rIdx % 2 === 0 ? 'bg-gray-50' : 'bg-gray-100'} group-hover:bg-blue-50 transition-colors`}>
                               <div className="relative flex items-center justify-end w-full">
                                 {isPdfGenerating ? (
-                                  <div className="text-sm font-black text-black text-right pr-4 py-1 min-h-[32px] flex items-center justify-end">
+                                  <div className="text-sm font-black text-black text-right pr-4 py-1 min-h-[32px] flex items-center justify-end w-full">
                                     {avgTb === 0 ? '-' : formatNumber(avgTb)}
                                   </div>
                                 ) : (
@@ -1018,7 +1058,7 @@ export default function App() {
                                   {isActive ? (
                                     <div className="flex items-center justify-center">
                                       {isPdfGenerating ? (
-                                        <div className={`min-w-[64px] max-w-[80px] text-center px-1.5 py-1.5 text-sm font-bold ${isPast ? 'text-gray-500' : 'text-black'}`}>
+                                        <div className={`text-center px-1.5 py-1.5 text-sm font-bold ${isPast ? 'text-gray-500' : 'text-black'}`}>
                                           {val === 0 ? '-' : formatNumber(val)}
                                         </div>
                                       ) : (
@@ -1191,7 +1231,7 @@ export default function App() {
               <div className="xl:col-span-1 space-y-6">
                 
                 {/* MARKET SHARES WIDGET (Soll im PDF gedruckt werden) */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden break-inside-avoid" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden break-inside-avoid">
                   <div className="bg-gray-50 border-b border-gray-200 p-4 flex items-center justify-between">
                     <h2 className="font-black uppercase tracking-wider text-xs text-black">Budget-Verteilung (Markt)</h2>
                   </div>
@@ -1277,7 +1317,7 @@ export default function App() {
                       </button>
                     </div>
                     <div className="text-[9px] font-bold text-gray-400 mt-2 text-center uppercase tracking-widest">
-                      Powered by Gemini AI (2.5 Pro)
+                      Powered by Gemini AI
                     </div>
                   </div>
                   
@@ -1300,94 +1340,3 @@ export default function App() {
                 <p className="text-xs text-gray-500 font-medium mb-6 bg-blue-50 text-blue-800 p-3 rounded-xl border border-blue-100 flex items-start gap-2">
                    <Info size={16} className="mt-0.5 shrink-0" />
                    Diese Projekte werden sicher in der Cloud gespeichert. Sobald du eines lädst, ist das <strong>Auto-Save</strong> aktiv.
-                </p>
-                {savedProjects.length === 0 ? (
-                   <div className="text-center py-12 border-2 border-dashed border-gray-200 rounded-2xl text-gray-400 font-bold bg-gray-50/50">
-                     Noch keine Projekte gespeichert.
-                   </div>
-                ) : (
-                   <div className="space-y-4">
-                      {savedProjects.map((proj) => (
-                         <div key={proj.id} className={`bg-white border ${activeProjectId === proj.id ? 'border-black ring-1 ring-black shadow-md' : 'border-gray-200 hover:shadow-md'} rounded-xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 transition-all group`}>
-                            <div>
-                               <h3 className="font-black text-black text-lg flex items-center gap-2">
-                                 <User size={16} className={`${activeProjectId === proj.id ? 'text-green-500' : 'text-gray-400'}`} /> 
-                                 {proj.clientName}
-                                 {activeProjectId === proj.id && <span className="ml-2 bg-black text-white text-[9px] px-2 py-0.5 rounded-full uppercase tracking-widest">Aktiv</span>}
-                               </h3>
-                               <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mt-1.5 flex items-center gap-1.5">
-                                  <Calendar size={12} /> {formatDateStr(proj.plannerStart)} — {formatDateStr(proj.plannerEnd)}
-                               </p>
-                               <p className="text-[10px] text-gray-400 mt-2">Letzte Änderung: {proj.timestamp}</p>
-                            </div>
-                            <div className="flex items-center gap-4 sm:gap-6 w-full sm:w-auto">
-                               <div className="text-right flex-1 sm:flex-none bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-100">
-                                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-0.5">Zielbudget</p>
-                                  <p className="font-black text-black">{formatCurrency(proj.targetBudget)}</p>
-                               </div>
-                               <div className="flex flex-col gap-2">
-                                 <button 
-                                   onClick={() => handleLoadProject(proj)}
-                                   disabled={activeProjectId === proj.id}
-                                   className={`px-4 py-2 rounded-lg font-bold uppercase text-[10px] tracking-wider shadow-sm transition-colors ${activeProjectId === proj.id ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-black text-white hover:bg-gray-800'}`}
-                                 >
-                                   {activeProjectId === proj.id ? 'Geöffnet' : 'Laden'}
-                                 </button>
-                                 <button 
-                                   onClick={() => handleDeleteProject(proj.id)}
-                                   className="px-4 py-2 bg-white text-red-600 hover:bg-red-50 border border-red-200 rounded-lg font-bold uppercase text-[10px] tracking-wider transition-colors opacity-0 group-hover:opacity-100"
-                                 >
-                                   Löschen
-                                 </button>
-                               </div>
-                            </div>
-                         </div>
-                      ))}
-                   </div>
-                )}
-             </div>
-          </div>
-        </div>
-      )}
-      
-      {/* 🛠️ NEUER CSS BLOCK FÜR DEN NATIVEN EXPORT */}
-      <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar { height: 8px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f8fafc; border-radius: 8px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; border: 2px solid #f8fafc; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-        
-        @media print {
-          /* Basis-Setup für das Blatt */
-          @page { size: landscape A4; margin: 10mm; }
-          body { background: white !important; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          
-          /* Versteckt alles Unnötige (Buttons, KI-Chat, Modal-Overlays) */
-          .print-hide { display: none !important; }
-          
-          /* Verhindert Seitenumbrüche mitten in Elementen */
-          .break-inside-avoid, tr { break-inside: avoid !important; page-break-inside: avoid !important; }
-          
-          /* Layout-Zwang für das Grid (Tabelle oben, Sidebar-Widgets darunter) */
-          .grid { display: block !important; }
-          .xl\\:col-span-3, .xl\\:col-span-4, .xl\\:col-span-1 { 
-            width: 100% !important; 
-            max-width: 100% !important; 
-            display: block !important; 
-            margin: 0 0 20px 0 !important; 
-          }
-          
-          /* Tabellen-Optimierung für scharfen Druck */
-          table { width: 100% !important; max-width: 100% !important; border-collapse: collapse !important; }
-          thead { display: table-header-group; } /* Wiederholt Tabellenkopf auf neuen Seiten */
-          tfoot { display: table-footer-group; }
-          
-          /* Leicht verkleinerte Schrift, damit 12 Monate gut auf A4 passen */
-          th, td { padding: 6px 4px !important; font-size: 10px !important; }
-          .text-xs { font-size: 9px !important; }
-          .text-sm { font-size: 10px !important; }
-        }
-      `}} />
-    </div>
-  );
-}
