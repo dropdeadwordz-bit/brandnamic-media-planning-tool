@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer } from 'lucide-react';
+import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer, Undo2 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -9,7 +9,6 @@ let firebaseConfig = {};
 if (typeof __firebase_config !== 'undefined') {
   firebaseConfig = JSON.parse(__firebase_config);
 } else {
-  // 🔴🔴🔴 HIER DEINE FIREBASE DATEN EINTRAGEN 🔴🔴🔴
   firebaseConfig = {
 apiKey: "AIzaSyBL9f_kigv3UYrLwq59hGj2VI7wV0G9-LU",
   authDomain: "brandnamic-media-planning-tool.firebaseapp.com",
@@ -17,9 +16,7 @@ apiKey: "AIzaSyBL9f_kigv3UYrLwq59hGj2VI7wV0G9-LU",
   storageBucket: "brandnamic-media-planning-tool.firebasestorage.app",
   messagingSenderId: "577187396851",
   appId: "1:577187396851:web:e05df3908fb9431d91cb86"
-
   };
-  // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
 }
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -99,12 +96,46 @@ export default function App() {
   const [campaigns, setCampaigns] = useState(generateInitialState());
   const [targetBudget, setTargetBudget] = useState(0); 
   
+  // Undo Historie State
+  const [history, setHistory] = useState([]);
+  
   // Projekt-Management & Auto-Save
   const [savedProjects, setSavedProjects] = useState([]);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [user, setUser] = useState(null);
   const [activeProjectId, setActiveProjectId] = useState(null);
-  const [syncStatus, setSyncStatus] = useState(''); // '', 'saving', 'saved'
+  const [syncStatus, setSyncStatus] = useState(''); 
+
+  // --- UNDO / HISTORY LOGIK ---
+  const saveToHistory = (currentCampaigns) => {
+    setHistory(prev => {
+      const newHist = [...prev, JSON.parse(JSON.stringify(currentCampaigns))];
+      return newHist.slice(-20); // Behalte max 20 Schritte im Speicher
+    });
+  };
+
+  const handleUndo = () => {
+    setHistory(prev => {
+      if (prev.length === 0) return prev;
+      const newHist = [...prev];
+      const lastState = newHist.pop();
+      setCampaigns(lastState);
+      setRebalanceLog(["Letzte Aktion rückgängig gemacht."]);
+      return newHist;
+    });
+  };
+
+  // STRG+Z Event Listener
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [history]);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -142,7 +173,6 @@ export default function App() {
   // --- AUTO-SAVE LOGIK ---
   useEffect(() => {
     if (!activeProjectId || !user) return;
-    
     setSyncStatus('saving');
     const timer = setTimeout(async () => {
       try {
@@ -154,15 +184,14 @@ export default function App() {
           plannerEnd,
           targetBudget,
           campaigns: JSON.parse(JSON.stringify(campaigns))
-        }, { merge: true }); // Merge verhindert Überschreiben der createdAt Zeit
+        }, { merge: true }); 
         setSyncStatus('saved');
-        setTimeout(() => setSyncStatus(''), 2500); // Erfolgsmeldung nach 2,5s ausblenden
+        setTimeout(() => setSyncStatus(''), 2500); 
       } catch (error) {
         console.error("Auto-save error:", error);
         setSyncStatus('');
       }
-    }, 1500); // 1.5 Sekunden nach der letzten Änderung speichern
-    
+    }, 1500); 
     return () => clearTimeout(timer);
   }, [campaigns, clientName, plannerStart, plannerEnd, targetBudget, activeProjectId, user]);
 
@@ -171,8 +200,8 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState([]);
+  const [isPdfGenerating, setIsPdfGenerating] = useState(false);
   
-  // Controlled Inputs für flüssiges Tippen trotz Formatierung
   const [activeTotalInput, setActiveTotalInput] = useState({ id: null, value: '' });
   const [activeDailyInput, setActiveDailyInput] = useState({ id: null, month: null, value: '' });
   
@@ -243,7 +272,6 @@ export default function App() {
     }
     
     grandTotal = Math.round(grandTotal * 100) / 100;
-    
     return { monthlyTotals, grandTotal };
   }, [campaigns, generatedMonths, plannerStart, plannerEnd, isInvalidDateRange]);
 
@@ -277,22 +305,20 @@ export default function App() {
       setRebalanceLog(["Fehler: Keine Datenbank-Verbindung."]);
       return;
     }
-    
     const projectId = activeProjectId || Date.now().toString();
     const projectData = {
       timestamp: new Date().toLocaleString('de-DE', { hour12: false }),
-      createdAt: activeProjectId ? undefined : Date.now(), // Nur beim ersten Erstellen setzen
+      createdAt: activeProjectId ? undefined : Date.now(), 
       clientName: clientName || 'Unbenannter Kunde',
       plannerStart,
       plannerEnd,
       targetBudget,
       campaigns: JSON.parse(JSON.stringify(campaigns))
     };
-    
     try {
       const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', projectId);
       await setDoc(projectRef, projectData, { merge: true });
-      if (!activeProjectId) setActiveProjectId(projectId); // Aktiviert ab sofort Auto-Save
+      if (!activeProjectId) setActiveProjectId(projectId); 
       setRebalanceLog(["Projekt wurde gesichert! Ab sofort werden alle Änderungen in diesem Projekt automatisch gespeichert."]);
       setSyncStatus('saved');
       setTimeout(() => setSyncStatus(''), 2500);
@@ -308,9 +334,23 @@ export default function App() {
     setPlannerEnd(project.plannerEnd);
     setTargetBudget(project.targetBudget);
     setCampaigns(project.campaigns);
-    setActiveProjectId(project.id); // Verbindet das Projekt, um Auto-Save zu aktivieren
+    setActiveProjectId(project.id); 
     setIsProjectModalOpen(false);
+    setHistory([]); 
     setRebalanceLog([`Projekt "${project.clientName}" geladen. Auto-Save ist aktiv.`]);
+  };
+
+  const handleNewProject = () => {
+    setClientName('');
+    setPlannerStart(`${currentYear}-01-01`);
+    setPlannerEnd(`${currentYear}-12-31`);
+    setTargetBudget(0);
+    setCampaigns(generateInitialState());
+    setActiveProjectId(null);
+    setChatHistory([]);
+    setHistory([]); 
+    setRebalanceLog(["Neues, leeres Projekt gestartet. Die Auto-Save-Verbindung wurde getrennt."]);
+    setSyncStatus('');
   };
 
   const handleDeleteProject = async (id) => {
@@ -318,13 +358,14 @@ export default function App() {
     try {
       const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', id);
       await deleteDoc(projectRef);
-      if (activeProjectId === id) setActiveProjectId(null); // Auto-save deaktivieren wenn aktuelles gelöscht wird
+      if (activeProjectId === id) setActiveProjectId(null); 
     } catch (error) {
       console.error("Löschfehler:", error);
     }
   };
 
   const handleDailyBudgetChange = (campId, monthKey, value) => {
+    saveToHistory(campaigns);
     const strVal = value.replace(/[^\d.,]/g, '').replace(',', '.');
     const numValue = parseFloat(strVal);
     const validValue = isNaN(numValue) || numValue < 0 ? 0 : numValue;
@@ -333,6 +374,7 @@ export default function App() {
   };
 
   const handleCampaignTbChange = (campId, value) => {
+    saveToHistory(campaigns);
     const strVal = value.replace(/[^\d.,]/g, '').replace(',', '.'); 
     if (strVal === '') {
       setCampaigns(prev => prev.map(c => c.id === campId ? { ...c, budgets: {} } : c));
@@ -346,7 +388,6 @@ export default function App() {
       const campStartStr = c.startDate || plannerStart;
       const campEndStr = c.endDate || plannerEnd;
       const newBudgets = { ...c.budgets };
-      
       generatedMonths.forEach(m => {
          if (getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr) > 0) {
             newBudgets[m.key] = newTb;
@@ -363,20 +404,24 @@ export default function App() {
   };
 
   const setCampaignToFullRuntime = (campId) => {
+    saveToHistory(campaigns);
     setCampaigns(prev => prev.map(c => c.id === campId ? { ...c, startDate: plannerStart, endDate: plannerEnd } : c));
     setRebalanceLog(null);
   };
 
   const handleAddCampaign = () => {
+    saveToHistory(campaigns);
     setCampaigns([...campaigns, { id: crypto.randomUUID(), market: '', name: 'Neue Kampagne', startDate: '', endDate: '', budgets: {} }]);
   };
 
   const handleDeleteCampaign = (campId) => {
+    saveToHistory(campaigns);
     setCampaigns(prev => prev.filter(c => c.id !== campId));
     setRebalanceLog(null);
   };
 
   const handleDuplicateCampaign = (campId) => {
+    saveToHistory(campaigns);
     const campToCopy = campaigns.find(c => c.id === campId);
     if (!campToCopy) return;
     const newCamp = {
@@ -396,7 +441,6 @@ export default function App() {
     setTargetBudget(parseInt(val, 10) || 0);
   };
 
-  // --- KI-ASSISTENT (GEMINI 2.5 PRO) ---
   const handleAiSubmit = async () => {
     if (!chatInput.trim()) return;
     setIsAiLoading(true);
@@ -405,33 +449,12 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
-      // 🔴🔴🔴 HIER DEINEN GEMINI API KEY EINTRAGEN 🔴🔴🔴
       const apiKey = process.env.REACT_APP_GEMINI_API_KEY; 
-      // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
-      
       if (!apiKey) throw new Error("MISSING_API_KEY");
 
       const systemPrompt = `
         Du bist der KI-Planungsassistent für den "Media Budget Planner".
         Deine Aufgabe ist es, die Text-Anweisungen des Users in aktualisierte Kampagnendaten (JSON) zu übersetzen.
-        
-        WICHTIGER KONTEXT:
-        - Geplanter globaler Zeitraum: ${plannerStart} bis ${plannerEnd}
-        - Aktuelles Zielbudget: ${targetBudget}€
-        - Aktuelle Kampagnenstruktur: ${JSON.stringify(campaigns)}
-        - Stichtag (Heute): ${referenceDate}
-
-        REGELN FÜR DIE BERECHNUNG:
-        1. Eine Kampagne besteht aus { id, market, name, startDate: "YYYY-MM-DD" (oder leer ""), endDate: "YYYY-MM-DD" (oder leer ""), budgets: { "YYYY-MM": tagesbudget_als_zahl } }.
-        2. Wenn der User spezifische Laufzeiten nennt, trage diese in 'startDate' und 'endDate' ein.
-        3. Passe 'newTargetBudget' an, WENN der User explizit ein neues Gesamtbudget vorgibt.
-
-        ANTWORT-SCHEMA (MUSS STRIKTES JSON SEIN):
-        {
-          "reply": "Kurze Bestätigung auf Deutsch.",
-          "newTargetBudget": 50000, 
-          "newCampaigns": [ ... Array aller Kampagnen ... ]
-        }
       `;
 
       const payload = {
@@ -449,7 +472,10 @@ export default function App() {
       rawText = rawText.replace(/```json/ig, '').replace(/```/g, '').trim();
       const result = JSON.parse(rawText);
       
-      if (result.newCampaigns && Array.isArray(result.newCampaigns)) setCampaigns(result.newCampaigns);
+      if (result.newCampaigns && Array.isArray(result.newCampaigns)) {
+        saveToHistory(campaigns);
+        setCampaigns(result.newCampaigns);
+      }
       if (result.newTargetBudget && typeof result.newTargetBudget === 'number') setTargetBudget(result.newTargetBudget);
       setChatHistory(prev => [...prev, { role: 'ai', text: result.reply }]);
 
@@ -457,11 +483,7 @@ export default function App() {
       console.error("AI Assistant Error Details:", error);
       let errorMsg = `Fehler: ${error.message}`;
       if (error.message === "MISSING_API_KEY") {
-         errorMsg = '⚠️ System-Info: Bitte hinterlege deinen Gemini API-Key im Quellcode (`const apiKey`), um den KI-Assistenten zu nutzen.';
-      } else if (error.message.includes('403')) {
-         errorMsg = `Zugriff verweigert (Fehler 403). Der API-Schlüssel ist ungültig oder das Modell ist gesperrt. Details: ${error.message}`;
-      } else if (error.message.includes('404')) {
-         errorMsg = `Modell nicht gefunden (Fehler 404). Dein Key hat keine Berechtigung für dieses Modell. Details: ${error.message}`;
+         errorMsg = '⚠️ System-Info: Bitte hinterlege deinen Gemini API-Key, um den KI-Assistenten zu nutzen.';
       }
       setChatHistory(prev => [...prev, { role: 'error', text: errorMsg }]);
     } finally {
@@ -473,7 +495,6 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory, isAiLoading]);
 
-  // --- UMVERTEILUNGS-ALGORITHMUS ---
   const performRebalance = (mode) => { 
     if (isInvalidDateRange) return;
     const diff = budgetExceededBy; 
@@ -481,8 +502,9 @@ export default function App() {
     if (mode === 'cut' && diff <= 0) return;
     if (mode === 'fill' && diff >= 0) return;
 
+    saveToHistory(campaigns); 
+
     let updatedCampaigns = JSON.parse(JSON.stringify(campaigns));
-    
     let futureTotal = 0;
     let totalFutureActiveDays = 0;
     let slots = [];
@@ -583,9 +605,8 @@ export default function App() {
     ]);
   };
 
-  // --- EXPORT FUNKTIONEN ---
   const handleExportCSV = () => {
-    const BOM = "\uFEFF"; // Wichtig für Excel und Umlaute
+    const BOM = "\uFEFF"; 
     let csv = "Markt;Kampagne;Start;Ende;";
     generatedMonths.forEach(m => csv += `${m.name};`);
     csv += "Total\n";
@@ -623,15 +644,32 @@ export default function App() {
     document.body.removeChild(link);
   };
 
-  const handlePrintPDF = () => {
-    window.print();
+  // --- NATIVE BROWSER PDF LOGIK ---
+  const handlePrintPDF = async () => {
+    setIsPdfGenerating(true); 
+    
+    // Warten, bis React alle Inputs in sauberen Text umgewandelt und Sticky-Klassen entfernt hat
+    await new Promise(resolve => setTimeout(resolve, 400));
+
+    try {
+      // Nutzt die native, fehlerfreie Druck-Engine des Browsers
+      window.print();
+      setRebalanceLog(["Druck-Dialog geöffnet. Bitte als Ziel 'Als PDF speichern' wählen."]);
+    } catch (error) {
+      console.error("Print Error:", error);
+      setRebalanceLog(["Fehler beim Öffnen des Druck-Dialogs."]);
+    } finally {
+      // Nach dem Druckdialog sofort wieder zur interaktiven Ansicht wechseln
+      setIsPdfGenerating(false); 
+    }
   };
 
   const totalColumns = 8 + generatedMonths.length;
 
   return (
     <div className="min-h-screen bg-[#f8fafc] text-gray-900 p-3 sm:p-6 font-sans selection:bg-black selection:text-white">
-      <div className="max-w-[1900px] mx-auto space-y-6">
+      {/* 🛠️ Container für den Druck optimiert (100% Breite statt w-max) */}
+      <div className={`mx-auto space-y-6 ${isPdfGenerating ? 'w-full max-w-none px-0' : 'max-w-[1900px]'}`} id="pdf-export-area">
         
         {/* --- HEADER --- */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 sm:p-6 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-5">
@@ -660,11 +698,15 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap gap-2 sm:gap-3 w-full lg:w-auto print-hide">
+            <button onClick={handleUndo} disabled={history.length === 0} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex disabled:opacity-50" title="Rückgängig (Strg+Z)">
+              <Undo2 size={18} /> <span className="hidden sm:inline">Rückgängig</span>
+            </button>
             <button onClick={handleExportCSV} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex">
               <Download size={18} /> <span className="hidden sm:inline">CSV</span>
             </button>
-            <button onClick={handlePrintPDF} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex">
-              <Printer size={18} /> <span className="hidden sm:inline">PDF</span>
+            <button onClick={handlePrintPDF} disabled={isPdfGenerating} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors shadow-sm flex disabled:opacity-50">
+              {isPdfGenerating ? <div className="w-4 h-4 border-2 border-gray-500 border-t-transparent rounded-full animate-spin"></div> : <Printer size={18} />} 
+              <span className="hidden sm:inline">{isPdfGenerating ? 'PDF...' : 'PDF'}</span>
             </button>
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="flex-1 lg:flex-none justify-center items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-black font-bold text-xs sm:text-sm uppercase tracking-wider rounded-xl transition-colors hidden xl:flex">
               {isSidebarOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />} 
@@ -695,36 +737,54 @@ export default function App() {
         </div>
 
         {/* --- BRIEFING BOX --- */}
-        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-gray-200 relative shadow-sm">
-          <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-3">
-             <Calendar size={16} className="text-black" />
-             <h2 className="font-black text-xs uppercase tracking-widest text-black">Briefing Eckdaten</h2>
+        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-gray-200 relative shadow-sm break-inside-avoid" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+          <div className="flex items-center justify-between mb-6 border-b border-gray-100 pb-3">
+             <div className="flex items-center gap-2">
+               <Calendar size={16} className="text-black" />
+               <h2 className="font-black text-xs uppercase tracking-widest text-black">Briefing Eckdaten</h2>
+             </div>
+             {activeProjectId && (
+               <button onClick={handleNewProject} className="text-[10px] font-bold uppercase tracking-wider bg-black text-white px-3 py-1.5 rounded-lg hover:bg-gray-800 transition-colors shadow-sm print-hide">
+                 + Neues Projekt
+               </button>
+             )}
           </div>
           
           <div className="flex flex-col xl:flex-row justify-between gap-8">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 sm:gap-6 flex-1">
-              
               <div className="flex flex-col w-full">
                 <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
                   <User size={12} /> Kunde
                 </label>
-                <input 
-                  type="text" 
-                  value={clientName} 
-                  onChange={(e) => setClientName(e.target.value)} 
-                  placeholder="z.B. Sensoria Dolomites"
-                  className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" 
-                />
+                {isPdfGenerating ? (
+                  <div className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold rounded-lg w-full min-h-[42px] flex items-center">{clientName || '-'}</div>
+                ) : (
+                  <input 
+                    type="text" 
+                    value={clientName} 
+                    onChange={(e) => setClientName(e.target.value)} 
+                    placeholder="z.B. Sensoria Dolomites"
+                    className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" 
+                  />
+                )}
               </div>
 
               <div className="flex flex-col w-full">
                 <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Zeitraum Start</label>
-                <input type="date" value={plannerStart} onChange={(e) => setPlannerStart(e.target.value)} className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" />
+                {isPdfGenerating ? (
+                  <div className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold rounded-lg w-full min-h-[42px] flex items-center">{formatDateStr(plannerStart)}</div>
+                ) : (
+                  <input type="date" value={plannerStart} onChange={(e) => setPlannerStart(e.target.value)} className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" />
+                )}
               </div>
 
               <div className="flex flex-col w-full">
                 <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Zeitraum Ende</label>
-                <input type="date" value={plannerEnd} onChange={(e) => setPlannerEnd(e.target.value)} className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" />
+                {isPdfGenerating ? (
+                  <div className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold rounded-lg w-full min-h-[42px] flex items-center">{formatDateStr(plannerEnd)}</div>
+                ) : (
+                  <input type="date" value={plannerEnd} onChange={(e) => setPlannerEnd(e.target.value)} className="bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-bold outline-none focus:bg-white focus:border-black focus:ring-1 focus:ring-black rounded-lg w-full transition-all" />
+                )}
               </div>
 
               <div className="flex flex-col w-full">
@@ -732,17 +792,22 @@ export default function App() {
                   Gesamtbudget (Kunde)
                 </label>
                 <div className="relative flex items-center">
-                  <input 
-                    type="text" 
-                    value={targetBudget === 0 ? '' : new Intl.NumberFormat('de-DE').format(targetBudget)} 
-                    onChange={handleTargetBudgetChange} 
-                    placeholder="0"
-                    className="bg-white border-2 border-black pl-3 pr-8 py-2.5 text-sm font-black outline-none focus:ring-2 focus:ring-gray-200 rounded-lg text-right w-full transition-shadow" 
-                  />
+                  {isPdfGenerating ? (
+                    <div className="bg-white border-2 border-black pl-3 pr-8 py-2.5 text-sm font-black rounded-lg text-right w-full min-h-[42px] flex items-center justify-end">
+                      {targetBudget === 0 ? '0' : new Intl.NumberFormat('de-DE').format(targetBudget)}
+                    </div>
+                  ) : (
+                    <input 
+                      type="text" 
+                      value={targetBudget === 0 ? '' : new Intl.NumberFormat('de-DE').format(targetBudget)} 
+                      onChange={handleTargetBudgetChange} 
+                      placeholder="0"
+                      className="bg-white border-2 border-black pl-3 pr-8 py-2.5 text-sm font-black outline-none focus:ring-2 focus:ring-gray-200 rounded-lg text-right w-full transition-shadow" 
+                    />
+                  )}
                   <span className="absolute right-3 text-sm font-black text-gray-500">€</span>
                 </div>
               </div>
-
             </div>
             
             <div className="flex flex-col items-start sm:items-center xl:items-end justify-center pt-5 xl:pt-0 border-t border-gray-100 xl:border-t-0 xl:border-l xl:pl-8">
@@ -753,7 +818,6 @@ export default function App() {
                 {formatCurrency(totals.grandTotal)}
               </div>
             </div>
-
           </div>
         </div>
 
@@ -811,23 +875,24 @@ export default function App() {
                 <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3 shadow-sm print-hide">
                   <Info className="text-blue-600 mt-0.5" size={20} />
                   <div>
-                    <h3 className="text-blue-900 font-black uppercase tracking-wider text-sm">Aktion erfolgreich</h3>
+                    <h3 className="text-blue-900 font-black uppercase tracking-wider text-sm">Info</h3>
                     {rebalanceLog.map((log, i) => <p key={i} className="text-blue-700 text-sm mt-1">{log}</p>)}
                   </div>
                 </div>
               )}
 
               {/* TABELLE CONTAINER */}
-              <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden flex flex-col shadow-md">
-                <div className="overflow-x-auto custom-scrollbar pb-2">
+              {/* 🛠️ WICHTIG: overflows werden komplett entfernt während isPdfGenerating */}
+              <div className={`bg-white rounded-2xl border border-gray-300 flex flex-col shadow-md ${isPdfGenerating ? '' : 'overflow-hidden'}`}>
+                <div className={`${isPdfGenerating ? '' : 'overflow-x-auto custom-scrollbar'} pb-2`}>
                   <table className="w-full text-sm text-left whitespace-nowrap table-auto border-collapse">
                     
                     {/* HEADER */}
                     <thead className="bg-gray-200 border-b-2 border-gray-300">
                       <tr>
-                        <th className="px-4 py-4 font-black text-gray-800 sticky left-0 bg-gray-200 z-40 border-r border-gray-300 min-w-[100px] w-[100px]">MARKT</th>
-                        <th className="px-4 py-4 font-black text-gray-800 sticky left-[100px] bg-gray-200 z-40 border-r border-gray-300 min-w-[130px] w-[130px]">KAMPAGNE</th>
-                        
+                        {/* 🛠️ Sticky CSS Klassen werden dynamisch auf '' (leer) gesetzt während PDF Export! */}
+                        <th className={`px-4 py-4 font-black text-black uppercase tracking-wider text-xs bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-0 z-30'}`}>Markt</th>
+                        <th className={`px-4 py-4 font-black text-black uppercase tracking-wider text-xs bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-[100px] z-30'}`}>Kampagne</th>
                         <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[120px] w-[120px]">TB (Opt.)</th>
                         <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[110px] w-[110px]">START</th>
                         <th className="px-3 py-4 font-black text-gray-700 border-r border-gray-300 text-xs min-w-[110px] w-[110px]">ENDE</th>
@@ -850,7 +915,7 @@ export default function App() {
                     <tbody>
                       <tr>
                         <td colSpan={totalColumns} className="bg-gray-100 p-0 border-b-2 border-gray-300">
-                          <div className="sticky left-0 px-4 py-3 text-black font-black text-xs uppercase tracking-widest inline-block bg-gray-100 z-30">
+                          <div className={`px-4 py-3 text-black font-black text-xs uppercase tracking-widest inline-block bg-gray-100 ${isPdfGenerating ? '' : 'sticky left-0 z-30'}`}>
                             Tagesbudgets (Editierbar)
                           </div>
                         </td>
@@ -871,39 +936,66 @@ export default function App() {
                          const rowBg = rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-100';
 
                          return (
-                          <tr key={`tb-${camp.id}`} className={`${rowBg} border-b border-gray-300 hover:bg-blue-50 transition-colors group`}>
-                            <td className={`px-4 py-2 text-black sticky left-0 z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>
-                              <input type="text" value={camp.market} onChange={(e) => handleCampaignEdit(camp.id, 'market', e.target.value)} className="w-full bg-transparent font-bold outline-none focus:border-b focus:border-black" placeholder="Markt" />
+                          <tr key={`tb-${camp.id}`} className={`${rowBg} border-b border-gray-300 hover:bg-blue-50 transition-colors group break-inside-avoid`}>
+                            
+                            <td className={`px-4 py-2 text-black border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors ${isPdfGenerating ? '' : 'sticky left-0 z-20'}`}>
+                              {isPdfGenerating ? (
+                                <div className="font-bold py-1 whitespace-normal break-words">{camp.market || '-'}</div>
+                              ) : (
+                                <input type="text" value={camp.market} onChange={(e) => handleCampaignEdit(camp.id, 'market', e.target.value)} className="w-full bg-transparent font-bold outline-none focus:border-b focus:border-black" placeholder="Markt" />
+                              )}
                             </td>
-                            <td className={`px-4 py-2 font-black text-black sticky left-[100px] z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>
-                              <input type="text" value={camp.name} onChange={(e) => handleCampaignEdit(camp.id, 'name', e.target.value)} className="w-full bg-transparent outline-none focus:border-b focus:border-black" placeholder="Kampagnenname" />
+                            
+                            <td className={`px-4 py-2 font-black text-black border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors ${isPdfGenerating ? '' : 'sticky left-[100px] z-20'}`}>
+                              {isPdfGenerating ? (
+                                <div className="font-black py-1 whitespace-normal break-words">{camp.name || '-'}</div>
+                              ) : (
+                                <input type="text" value={camp.name} onChange={(e) => handleCampaignEdit(camp.id, 'name', e.target.value)} className="w-full bg-transparent outline-none focus:border-b focus:border-black" placeholder="Kampagnenname" />
+                              )}
                             </td>
                             
                             <td className={`px-2 py-2 border-r border-gray-300 align-middle ${rIdx % 2 === 0 ? 'bg-gray-50' : 'bg-gray-100'} group-hover:bg-blue-50 transition-colors`}>
                               <div className="relative flex items-center justify-end w-full">
-                                <input 
-                                  type="text" 
-                                  value={activeTotalInput.id === camp.id ? activeTotalInput.value : (avgTb === 0 ? '' : formatNumber(avgTb))} 
-                                  onChange={(e) => setActiveTotalInput({ id: camp.id, value: e.target.value })} 
-                                  onBlur={() => {
-                                    if (activeTotalInput.id === camp.id) {
-                                      handleCampaignTbChange(camp.id, activeTotalInput.value);
-                                      setActiveTotalInput({ id: null, value: '' });
-                                    }
-                                  }}
-                                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-                                  placeholder="-"
-                                  className="w-full bg-transparent text-sm font-black text-black outline-none focus:border-b focus:border-black text-right pr-4" 
-                                />
+                                {isPdfGenerating ? (
+                                  <div className="text-sm font-black text-black text-right pr-4 py-1 min-h-[32px] flex items-center justify-end">
+                                    {avgTb === 0 ? '-' : formatNumber(avgTb)}
+                                  </div>
+                                ) : (
+                                  <input 
+                                    type="text" 
+                                    value={activeTotalInput.id === camp.id ? activeTotalInput.value : (avgTb === 0 ? '' : formatNumber(avgTb))} 
+                                    onChange={(e) => setActiveTotalInput({ id: camp.id, value: e.target.value })} 
+                                    onBlur={() => {
+                                      if (activeTotalInput.id === camp.id) {
+                                        handleCampaignTbChange(camp.id, activeTotalInput.value);
+                                        setActiveTotalInput({ id: null, value: '' });
+                                      }
+                                    }}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                                    placeholder="-"
+                                    className="w-full bg-transparent text-sm font-black text-black outline-none focus:border-b focus:border-black text-right pr-4" 
+                                  />
+                                )}
                                 <span className="absolute right-1 text-[10px] font-bold text-gray-400">€</span>
                               </div>
                             </td>
+
                             <td className="px-2 py-2 border-r border-gray-300 align-middle">
-                              <input type="date" value={camp.startDate} onChange={(e) => handleCampaignEdit(camp.id, 'startDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
+                              {isPdfGenerating ? (
+                                <div className="w-full text-center text-[11px] font-bold text-gray-600 py-1">{formatDateStr(camp.startDate) || '-'}</div>
+                              ) : (
+                                <input type="date" value={camp.startDate} onChange={(e) => handleCampaignEdit(camp.id, 'startDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
+                              )}
                             </td>
+
                             <td className="px-2 py-2 border-r border-gray-300 align-middle">
-                              <input type="date" value={camp.endDate} onChange={(e) => handleCampaignEdit(camp.id, 'endDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
+                              {isPdfGenerating ? (
+                                <div className="w-full text-center text-[11px] font-bold text-gray-600 py-1">{formatDateStr(camp.endDate) || '-'}</div>
+                              ) : (
+                                <input type="date" value={camp.endDate} onChange={(e) => handleCampaignEdit(camp.id, 'endDate', e.target.value)} className="w-full bg-transparent text-[11px] font-bold text-gray-600 outline-none focus:text-black cursor-pointer" />
+                              )}
                             </td>
+
                             <td className="px-1 py-2 border-r border-gray-300 align-middle text-center print-hide">
                               <button 
                                 onClick={() => setCampaignToFullRuntime(camp.id)} 
@@ -919,29 +1011,34 @@ export default function App() {
                               const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
                               const isActive = cDays > 0;
                               const val = camp.budgets[m.key] || 0;
-                              
                               const isCurrentlyActiveInput = activeDailyInput.id === camp.id && activeDailyInput.month === m.key;
                               
                               return (
                                 <td key={`tb-${camp.id}-${m.key}`} className={`p-1.5 border-r border-gray-200 text-center ${isPast ? 'bg-gray-100/50' : ''}`}>
                                   {isActive ? (
                                     <div className="flex items-center justify-center">
-                                      <input
-                                        type="text"
-                                        value={isCurrentlyActiveInput ? activeDailyInput.value : (val === 0 ? '' : formatNumber(val))}
-                                        onChange={(e) => setActiveDailyInput({ id: camp.id, month: m.key, value: e.target.value })}
-                                        onBlur={() => {
-                                          if (isCurrentlyActiveInput) {
-                                            handleDailyBudgetChange(camp.id, m.key, activeDailyInput.value);
-                                            setActiveDailyInput({ id: null, month: null, value: '' });
-                                          }
-                                        }}
-                                        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-                                        placeholder="-"
-                                        className={`min-w-[64px] w-full max-w-[80px] text-center px-1.5 py-1.5 rounded-md text-sm font-bold outline-none transition-all duration-200
-                                          ${isPast ? 'bg-transparent text-gray-500 border border-transparent' : 'bg-white border border-gray-300 hover:border-black focus:border-black focus:ring-1 focus:ring-black text-black shadow-sm'}
-                                        `}
-                                      />
+                                      {isPdfGenerating ? (
+                                        <div className={`min-w-[64px] max-w-[80px] text-center px-1.5 py-1.5 text-sm font-bold ${isPast ? 'text-gray-500' : 'text-black'}`}>
+                                          {val === 0 ? '-' : formatNumber(val)}
+                                        </div>
+                                      ) : (
+                                        <input
+                                          type="text"
+                                          value={isCurrentlyActiveInput ? activeDailyInput.value : (val === 0 ? '' : formatNumber(val))}
+                                          onChange={(e) => setActiveDailyInput({ id: camp.id, month: m.key, value: e.target.value })}
+                                          onBlur={() => {
+                                            if (isCurrentlyActiveInput) {
+                                              handleDailyBudgetChange(camp.id, m.key, activeDailyInput.value);
+                                              setActiveDailyInput({ id: null, month: null, value: '' });
+                                            }
+                                          }}
+                                          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                                          placeholder="-"
+                                          className={`min-w-[64px] w-full max-w-[80px] text-center px-1.5 py-1.5 rounded-md text-sm font-bold outline-none transition-all duration-200
+                                            ${isPast ? 'bg-transparent text-gray-500 border border-transparent' : 'bg-white border border-gray-300 hover:border-black focus:border-black focus:ring-1 focus:ring-black text-black shadow-sm'}
+                                          `}
+                                        />
+                                      )}
                                       <span className={`text-[11px] font-bold ml-1 ${isPast ? 'text-gray-400' : 'text-gray-600'}`}>€</span>
                                       {cDays < m.days && <span className="text-[9px] font-bold text-blue-400 ml-1 print-hide" title={`${cDays} aktive Tage`}>({cDays}T)</span>}
                                     </div>
@@ -951,11 +1048,12 @@ export default function App() {
                                 </td>
                               );
                             })}
-                            <td className="px-4 py-2 border-l-2 border-gray-300 bg-gray-50 text-right font-black text-gray-800 group-hover:bg-blue-100 transition-colors">
-                               {formatCurrency(campTotal)}
+
+                            <td className="px-4 py-3 font-black text-black text-right bg-gray-50 border-l-2 border-gray-300 group-hover:bg-blue-100 transition-colors">
+                              {formatCurrency(campTotal)}
                             </td>
-                            <td className="px-2 py-2 text-center flex items-center justify-center gap-1 h-full min-h-[44px] print-hide">
-                              <button onClick={() => handleDuplicateCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-blue-100 hover:text-blue-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne duplizieren (Boost)">
+                            <td className="px-2 py-3 text-center print-hide">
+                              <button onClick={() => handleDuplicateCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-gray-200 hover:text-black rounded-lg transition-colors opacity-0 group-hover:opacity-100 mr-1" title="Kampagne duplizieren">
                                 <Copy size={16} />
                               </button>
                               <button onClick={() => handleDeleteCampaign(camp.id)} className="p-1.5 text-gray-400 hover:bg-red-100 hover:text-red-600 rounded-lg transition-colors opacity-0 group-hover:opacity-100" title="Kampagne löschen">
@@ -963,13 +1061,13 @@ export default function App() {
                               </button>
                             </td>
                           </tr>
-                        );
+                         );
                       })}
 
                       {/* --- SUMME TAGESBUDGETS --- */}
                       <tr className="bg-gray-200 border-t-2 border-b-2 border-gray-300">
-                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-0 z-20 bg-gray-200 border-r border-gray-300">SUMME</td>
-                        <td className="px-4 py-3.5 font-black text-black text-left sticky left-[100px] z-20 bg-gray-200 border-r border-gray-300">Tagesbudgets</td>
+                        <td className={`px-4 py-3.5 font-black text-black text-left bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-0 z-20'}`}>SUMME</td>
+                        <td className={`px-4 py-3.5 font-black text-black text-left bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-[100px] z-20'}`}>Tagesbudgets</td>
                         <td className="border-r border-gray-300 bg-gray-200"></td>
                         <td className="border-r border-gray-300 bg-gray-200"></td>
                         <td className="border-r border-gray-300 bg-gray-200"></td>
@@ -992,7 +1090,7 @@ export default function App() {
                       {/* --- KAMPAGNE HINZUFÜGEN BUTTON --- */}
                       <tr className="print-hide">
                         <td colSpan={totalColumns} className="bg-white p-0 border-b border-gray-300">
-                           <div className="sticky left-0 inline-block p-4 z-10">
+                           <div className={`inline-block p-4 ${isPdfGenerating ? '' : 'sticky left-0 z-10'}`}>
                               <button onClick={handleAddCampaign} className="text-xs font-black uppercase tracking-wider text-black bg-white hover:bg-gray-50 px-4 py-2 border border-gray-300 rounded-lg transition-colors shadow-sm flex items-center gap-2">
                                 <Plus size={16} strokeWidth={2.5} /> Kampagne hinzufügen
                               </button>
@@ -1005,7 +1103,7 @@ export default function App() {
                     <tbody>
                       <tr>
                         <td colSpan={totalColumns} className="bg-gray-100 p-0 border-b-2 border-gray-300">
-                           <div className="sticky left-0 px-4 py-3 text-black font-black text-xs uppercase tracking-widest inline-block bg-gray-100 z-30">
+                           <div className={`px-4 py-3 text-black font-black text-xs uppercase tracking-widest inline-block bg-gray-100 ${isPdfGenerating ? '' : 'sticky left-0 z-30'}`}>
                               Monats- & Gesamtbudgets (Berechnet)
                            </div>
                         </td>
@@ -1017,24 +1115,25 @@ export default function App() {
                         const rowBg = rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-100';
 
                         return (
-                          <tr key={`tot-${camp.id}`} className={`${rowBg} border-b border-gray-300 hover:bg-blue-50 transition-colors group`}>
-                            <td className={`px-4 py-3 font-bold text-gray-700 text-left sticky left-0 z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>{camp.market}</td>
-                            <td className={`px-4 py-3 font-black text-gray-900 text-left sticky left-[100px] z-20 border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors`}>{camp.name}</td>
-                            <td className="px-2 py-3 border-r border-gray-300 text-xs font-bold text-gray-500"></td>
-                            <td className="px-2 py-3 border-r border-gray-300 text-[11px] font-bold text-gray-500">{formatDateStr(camp.startDate)}</td>
-                            <td className="px-2 py-3 border-r border-gray-300 text-[11px] font-bold text-gray-500">{formatDateStr(camp.endDate)}</td>
-                            <td className="px-1 py-3 border-r border-gray-300 print-hide"></td>
+                          <tr key={`tot-${camp.id}`} className={`${rowBg} border-b border-gray-300 hover:bg-blue-50 transition-colors group break-inside-avoid`}>
+                            <td className={`px-4 py-3 font-bold text-gray-700 text-left border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors ${isPdfGenerating ? '' : 'sticky left-0 z-20'}`}>{camp.market || '-'}</td>
+                            <td className={`px-4 py-3 font-black text-gray-900 text-left border-r border-gray-300 ${rowBg} group-hover:bg-blue-50 transition-colors ${isPdfGenerating ? '' : 'sticky left-[100px] z-20'}`}>{camp.name || '-'}</td>
+                            <td className="px-4 py-3 border-r border-gray-300 text-center text-gray-400">-</td>
+                            <td className="px-2 py-3 border-r border-gray-300 text-center text-[10px] text-gray-500">{formatDateStr(camp.startDate)}</td>
+                            <td className="px-2 py-3 border-r border-gray-300 text-center text-[10px] text-gray-500">{formatDateStr(camp.endDate)}</td>
+                            <td className="px-1 py-3 border-r border-gray-300 text-center print-hide"></td>
+                            
                             {generatedMonths.map((m) => {
                               const cDays = getDaysOverlap(campStartStr, campEndStr, m.actualStartStr, m.actualEndStr);
-                              const val = camp.budgets[m.key] || 0;
-                              const monthBudget = val * cDays;
-                              campTotal += monthBudget;
+                              const val = (camp.budgets[m.key] || 0) * cDays;
+                              campTotal += val;
                               return (
-                                <td key={`tot-${camp.id}-${m.key}`} className={`px-3 py-3 text-center border-r border-gray-200 ${monthBudget === 0 ? 'text-gray-300' : 'text-gray-800 font-bold'}`}>
-                                  {monthBudget === 0 ? '-' : formatCurrency(monthBudget)}
+                                <td key={`mtot-${camp.id}-${m.key}`} className="px-3 py-3 border-r border-gray-300 text-center font-bold text-gray-800">
+                                  {val > 0 ? formatCurrency(val) : '-'}
                                 </td>
                               );
                             })}
+                            
                             <td className="px-4 py-3 font-black text-black text-right bg-gray-50 border-l-2 border-gray-300 group-hover:bg-blue-100 transition-colors">
                               {formatCurrency(campTotal)}
                             </td>
@@ -1042,12 +1141,30 @@ export default function App() {
                           </tr>
                         );
                       })}
+
+                      {/* --- SUMME MONATSBUDGETS --- */}
+                      <tr className="bg-gray-200 border-t-2 border-b-2 border-gray-300 break-inside-avoid">
+                        <td className={`px-4 py-3.5 font-black text-black text-left bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-0 z-20'}`}>SUMME</td>
+                        <td className={`px-4 py-3.5 font-black text-black text-left bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-[100px] z-20'}`}>Monatsbudgets</td>
+                        <td className="px-4 py-3.5 bg-gray-200 border-r border-gray-300"></td>
+                        <td className="px-4 py-3.5 bg-gray-200 border-r border-gray-300"></td>
+                        <td className="px-4 py-3.5 bg-gray-200 border-r border-gray-300"></td>
+                        <td className="px-4 py-3.5 bg-gray-200 border-r border-gray-300 print-hide"></td>
+                        {generatedMonths.map(m => (
+                          <td key={`sum-month-${m.key}`} className="px-4 py-3.5 font-black text-center text-black border-r border-gray-300 bg-gray-200">
+                            {totals.monthlyTotals[m.key] > 0 ? formatCurrency(totals.monthlyTotals[m.key]) : '-'}
+                          </td>
+                        ))}
+                        <td className="bg-gray-200 border-l-2 border-gray-300"></td>
+                        <td className="bg-gray-200 print-hide"></td>
+                      </tr>
                     </tbody>
                     
-                    <tfoot className="bg-white border-t-2 border-gray-400 shadow-t-md">
+                    {/* --- TFOOT: GLOBALE SUMME --- */}
+                    <tfoot className="bg-white border-t-2 border-gray-400 shadow-t-md break-inside-avoid">
                       <tr>
-                        <td className="px-4 py-5 font-black uppercase tracking-widest text-black text-left sticky left-0 z-30 bg-gray-200 border-r border-gray-300">GESAMT</td>
-                        <td className="px-4 py-5 font-black uppercase tracking-widest text-black text-left sticky left-[100px] z-30 bg-gray-200 border-r border-gray-300">BUDGET</td>
+                        <td className={`px-4 py-5 font-black uppercase tracking-widest text-black text-left bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-0 z-30'}`}>GESAMT</td>
+                        <td className={`px-4 py-5 font-black uppercase tracking-widest text-black text-left bg-gray-200 border-r border-gray-300 ${isPdfGenerating ? '' : 'sticky left-[100px] z-30'}`}>BUDGET</td>
                         <td className="border-r border-gray-300 bg-gray-200"></td>
                         <td className="border-r border-gray-300 bg-gray-200"></td>
                         <td className="border-r border-gray-300 bg-gray-200"></td>
@@ -1071,10 +1188,10 @@ export default function App() {
 
             {/* --- SIDEBAR: KI ASSISTENT & VERTEILUNG --- */}
             {isSidebarOpen && (
-              <div className="xl:col-span-1 space-y-6 print-hide">
+              <div className="xl:col-span-1 space-y-6">
                 
-                {/* MARKET SHARES WIDGET */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                {/* MARKET SHARES WIDGET (Soll im PDF gedruckt werden) */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden break-inside-avoid" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                   <div className="bg-gray-50 border-b border-gray-200 p-4 flex items-center justify-between">
                     <h2 className="font-black uppercase tracking-wider text-xs text-black">Budget-Verteilung (Markt)</h2>
                   </div>
@@ -1101,8 +1218,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* KI ASSISTENT */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[500px] xl:h-[calc(100vh-280px)] sticky top-6">
+                {/* KI ASSISTENT (Wird im PDF versteckt) */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[500px] xl:h-[calc(100vh-280px)] sticky top-6 print-hide">
                   <div className="bg-gray-50 border-b border-gray-200 p-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="bg-blue-100 p-1.5 rounded-lg"><Sparkles size={16} className="text-blue-600" /></div>
@@ -1233,6 +1350,7 @@ export default function App() {
         </div>
       )}
       
+      {/* 🛠️ NEUER CSS BLOCK FÜR DEN NATIVEN EXPORT */}
       <style dangerouslySetInnerHTML={{__html: `
         .custom-scrollbar::-webkit-scrollbar { height: 8px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: #f8fafc; border-radius: 8px; }
@@ -1240,14 +1358,34 @@ export default function App() {
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         
         @media print {
-          body { background: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          /* Basis-Setup für das Blatt */
+          @page { size: landscape A4; margin: 10mm; }
+          body { background: white !important; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          
+          /* Versteckt alles Unnötige (Buttons, KI-Chat, Modal-Overlays) */
           .print-hide { display: none !important; }
-          .custom-scrollbar { overflow: visible !important; }
-          table { width: 100% !important; font-size: 10px !important; }
-          /* Entfernt den "Sticky" Effekt, damit beim Scrollen nichts überlappt auf dem Papier */
-          .sticky { position: static !important; }
-          /* Sorgt dafür, dass es bevorzugt quer (Landscape) gedruckt wird */
-          @page { size: landscape; margin: 1cm; }
+          
+          /* Verhindert Seitenumbrüche mitten in Elementen */
+          .break-inside-avoid, tr { break-inside: avoid !important; page-break-inside: avoid !important; }
+          
+          /* Layout-Zwang für das Grid (Tabelle oben, Sidebar-Widgets darunter) */
+          .grid { display: block !important; }
+          .xl\\:col-span-3, .xl\\:col-span-4, .xl\\:col-span-1 { 
+            width: 100% !important; 
+            max-width: 100% !important; 
+            display: block !important; 
+            margin: 0 0 20px 0 !important; 
+          }
+          
+          /* Tabellen-Optimierung für scharfen Druck */
+          table { width: 100% !important; max-width: 100% !important; border-collapse: collapse !important; }
+          thead { display: table-header-group; } /* Wiederholt Tabellenkopf auf neuen Seiten */
+          tfoot { display: table-footer-group; }
+          
+          /* Leicht verkleinerte Schrift, damit 12 Monate gut auf A4 passen */
+          th, td { padding: 6px 4px !important; font-size: 10px !important; }
+          .text-xs { font-size: 9px !important; }
+          .text-sm { font-size: 10px !important; }
         }
       `}} />
     </div>
