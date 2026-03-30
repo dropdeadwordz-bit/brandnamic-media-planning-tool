@@ -406,7 +406,7 @@ export default function App() {
 
     try {
       // 🔴🔴🔴 HIER DEINEN GEMINI API KEY EINTRAGEN 🔴🔴🔴
-      const apiKey = "process.env.REACT_APP_GEMINI_API_KEY"; 
+      const apiKey = process.env.REACT_APP_GEMINI_API_KEY; 
       // 🔴🔴🔴 --------------------------------------- 🔴🔴🔴
       
       if (!apiKey) throw new Error("MISSING_API_KEY");
