@@ -1,5 +1,6 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Calculator, AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer, Undo2 } from 'lucide-react';
+/* global __firebase_config, __initial_auth_token, __app_id */
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer, Undo2 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -94,7 +95,7 @@ export default function App() {
     });
   };
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     setHistory(prev => {
       if (prev.length === 0) return prev;
       const newHist = [...prev];
@@ -103,7 +104,7 @@ export default function App() {
       setRebalanceLog(["Letzte Aktion rückgängig gemacht."]);
       return newHist;
     });
-  };
+  }, []);
 
   // STRG+Z Event Listener
   useEffect(() => {
@@ -115,7 +116,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [history]);
+  }, [handleUndo]);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -421,7 +422,7 @@ export default function App() {
     setTargetBudget(parseInt(val, 10) || 0);
   };
 
-  // --- REPARIERTER KI-ASSISTENT (Inlined Fetch für Canvas Interceptor) ---
+  // --- REPARIERTER KI-ASSISTENT ---
   const handleAiSubmit = async () => {
     if (!chatInput.trim()) return;
     setIsAiLoading(true);
@@ -430,7 +431,7 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
-      const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
+      const apiKey = process.env.REACT_APP_GEMINI_API_KEY; 
       const systemPrompt = `Du bist der KI-Planungsassistent für den "Media Budget Planner".
 Deine Aufgabe ist es, die Text-Anweisungen des Users in aktualisierte Kampagnendaten zu übersetzen.
 WICHTIGER KONTEXT:
@@ -1058,7 +1059,7 @@ REGELN:
                                   {isActive ? (
                                     <div className="flex items-center justify-center">
                                       {isPdfGenerating ? (
-                                        <div className={`text-center px-1.5 py-1.5 text-sm font-bold ${isPast ? 'text-gray-500' : 'text-black'}`}>
+                                        <div className={`min-w-[64px] max-w-[80px] text-center px-1.5 py-1.5 text-sm font-bold ${isPast ? 'text-gray-500' : 'text-black'}`}>
                                           {val === 0 ? '-' : formatNumber(val)}
                                         </div>
                                       ) : (
@@ -1340,3 +1341,98 @@ REGELN:
                 <p className="text-xs text-gray-500 font-medium mb-6 bg-blue-50 text-blue-800 p-3 rounded-xl border border-blue-100 flex items-start gap-2">
                    <Info size={16} className="mt-0.5 shrink-0" />
                    Diese Projekte werden sicher in der Cloud gespeichert. Sobald du eines lädst, ist das <strong>Auto-Save</strong> aktiv.
+                </p>
+                {savedProjects.length === 0 ? (
+                   <div className="text-center py-12 border-2 border-dashed border-gray-200 rounded-2xl text-gray-400 font-bold bg-gray-50/50">
+                     Noch keine Projekte gespeichert.
+                   </div>
+                ) : (
+                   <div className="space-y-4">
+                      {savedProjects.map((proj) => (
+                         <div key={proj.id} className={`bg-white border ${activeProjectId === proj.id ? 'border-black ring-1 ring-black shadow-md' : 'border-gray-200 hover:shadow-md'} rounded-xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 transition-all group`}>
+                            <div>
+                               <h3 className="font-black text-black text-lg flex items-center gap-2">
+                                 <User size={16} className={`${activeProjectId === proj.id ? 'text-green-500' : 'text-gray-400'}`} /> 
+                                 {proj.clientName}
+                                 {activeProjectId === proj.id && <span className="ml-2 bg-black text-white text-[9px] px-2 py-0.5 rounded-full uppercase tracking-widest">Aktiv</span>}
+                               </h3>
+                               <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mt-1.5 flex items-center gap-1.5">
+                                  <Calendar size={12} /> {formatDateStr(proj.plannerStart)} — {formatDateStr(proj.plannerEnd)}
+                               </p>
+                               <p className="text-[10px] text-gray-400 mt-2">Letzte Änderung: {proj.timestamp}</p>
+                            </div>
+                            <div className="flex items-center gap-4 sm:gap-6 w-full sm:w-auto">
+                               <div className="text-right flex-1 sm:flex-none bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-100">
+                                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-0.5">Zielbudget</p>
+                                  <p className="font-black text-black">{formatCurrency(proj.targetBudget)}</p>
+                               </div>
+                               <div className="flex flex-col gap-2">
+                                 <button 
+                                   onClick={() => handleLoadProject(proj)}
+                                   disabled={activeProjectId === proj.id}
+                                   className={`px-4 py-2 rounded-lg font-bold uppercase text-[10px] tracking-wider shadow-sm transition-colors ${activeProjectId === proj.id ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-black text-white hover:bg-gray-800'}`}
+                                 >
+                                   {activeProjectId === proj.id ? 'Geöffnet' : 'Laden'}
+                                 </button>
+                                 <button 
+                                   onClick={() => handleDeleteProject(proj.id)}
+                                   className="px-4 py-2 bg-white text-red-600 hover:bg-red-50 border border-red-200 rounded-lg font-bold uppercase text-[10px] tracking-wider transition-colors opacity-0 group-hover:opacity-100"
+                                 >
+                                   Löschen
+                                 </button>
+                               </div>
+                            </div>
+                         </div>
+                      ))}
+                   </div>
+                )}
+             </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 🛠️ NEUER CSS BLOCK FÜR DEN NATIVEN EXPORT - GANZ OHNE ZERQUETSCHEN */}
+      <style dangerouslySetInnerHTML={{__html: `
+        .custom-scrollbar::-webkit-scrollbar { height: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f8fafc; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; border: 2px solid #f8fafc; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        /* Diese CSS-Klasse wird kurz vorm Drucken aktiv und entfernt ALLE künstlichen Breiten */
+        .pdf-render-mode th, .pdf-render-mode td {
+          min-width: 0 !important;
+          width: auto !important;
+          padding: 4px 2px !important;
+          font-size: 9px !important;
+          white-space: normal !important;
+          word-wrap: break-word !important;
+        }
+        
+        .pdf-render-mode .text-sm { font-size: 9px !important; }
+        .pdf-render-mode .text-xs { font-size: 8px !important; }
+        .pdf-render-mode .text-[10px], .pdf-render-mode .text-[11px] { font-size: 7px !important; }
+        
+        @media print {
+          @page { size: landscape A4; margin: 10mm; }
+          body { background: white !important; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          
+          .print-hide { display: none !important; }
+          .break-inside-avoid, tr { break-inside: avoid !important; page-break-inside: avoid !important; }
+          
+          .grid { display: block !important; }
+          .xl\\:col-span-3, .xl\\:col-span-4, .xl\\:col-span-1 { 
+            width: 100% !important; 
+            max-width: 100% !important; 
+            display: block !important; 
+            margin: 0 0 20px 0 !important; 
+          }
+          
+          /* Zwingt den Browser, die Tabelle als Auto-Layout in 100% Breite auf die A4 Seite zu setzen */
+          table { width: 100% !important; max-width: 100% !important; border-collapse: collapse !important; table-layout: auto !important; }
+          thead { display: table-header-group; } 
+          tfoot { display: table-footer-group; }
+        }
+      `}} />
+    </div>
+  );
+}
