@@ -1,6 +1,6 @@
 /* global __firebase_config, __initial_auth_token, __app_id */
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer, Undo2 } from 'lucide-react';
+import { AlertCircle, ArrowRightLeft, Calendar, Info, Trash2, Plus, Send, Bot, Sparkles, RotateCcw, ArrowUpCircle, Save, FolderOpen, X, User, Copy, PanelRightClose, PanelRightOpen, Cloud, CloudOff, CheckCircle2, Download, Printer, Undo2, Settings } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -182,6 +182,12 @@ export default function App() {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState([]);
   const [isPdfGenerating, setIsPdfGenerating] = useState(false);
+  
+  // API Key Status für Custom Vercel Deployments
+  const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState(() => {
+    try { return localStorage.getItem('gemini_api_key') || ''; } catch(e) { return ''; }
+  });
   
   const [activeTotalInput, setActiveTotalInput] = useState({ id: null, value: '' });
   const [activeDailyInput, setActiveDailyInput] = useState({ id: null, month: null, value: '' });
@@ -422,7 +428,7 @@ export default function App() {
     setTargetBudget(parseInt(val, 10) || 0);
   };
 
-  // --- REPARIERTER KI-ASSISTENT ---
+  // --- FINALE KI-LOGIK FÜR VERCEL ---
   const handleAiSubmit = async () => {
     if (!chatInput.trim()) return;
     setIsAiLoading(true);
@@ -431,11 +437,19 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
-      // Exakt die Version, die wir zuvor erfolgreich genutzt haben
-      const apiKey = process.env.REACT_APP_GEMINI_API_KEY; 
+      // 1. Hole den API-Key auf dem sichersten, kompatibelsten Weg
+      let finalApiKey = customApiKey.trim();
+      
+      try {
+        if (process.env.REACT_APP_GEMINI_API_KEY) {
+          finalApiKey = process.env.REACT_APP_GEMINI_API_KEY;
+        }
+      } catch(e) {
+        // Wird ignoriert, wenn process.env nicht existiert
+      }
 
-      if (!apiKey) {
-         throw new Error("API_KEY_MISSING");
+      if (!finalApiKey) {
+         throw new Error("Bitte hinterlege deinen API Key in den Vercel Environment Variables (REACT_APP_GEMINI_API_KEY) oder trage ihn rechts im ⚙️-Menü ein.");
       }
 
       const systemPrompt = `Du bist der KI-Planungsassistent für den "Media Budget Planner".
@@ -450,81 +464,45 @@ REGELN:
 1. Analysiere die Anfrage des Users.
 2. Wenn Budgets geändert werden sollen, passe die entsprechenden Monate in "budgets" an.
 3. Wenn neue Kampagnen erstellt werden sollen, füge sie hinzu.
-4. Gib IMMER ein gültiges JSON-Objekt zurück, das exakt dem geforderten Schema entspricht.
-5. Das Feld "reply" MUSS eine kurze, freundliche Bestätigung auf Deutsch enthalten.`;
+4. Gib IMMER ein gültiges JSON-Objekt zurück.
+5. Das Feld "reply" MUSS eine kurze, freundliche Bestätigung auf Deutsch enthalten.
+6. Das Feld "newCampaigns" muss ein Array mit allen Kampagnen sein.`;
 
       const payload = {
         contents: [{ parts: [{ text: userMessage }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: { 
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: "OBJECT",
-            properties: {
-              reply: { type: "STRING" },
-              newTargetBudget: { type: "NUMBER" },
-              newCampaigns: {
-                type: "ARRAY",
-                items: {
-                  type: "OBJECT",
-                  properties: {
-                    id: { type: "STRING" },
-                    market: { type: "STRING" },
-                    name: { type: "STRING" },
-                    startDate: { type: "STRING" },
-                    endDate: { type: "STRING" },
-                    budgets: { type: "OBJECT" }
-                  }
-                }
-              }
-            },
-            required: ["reply", "newCampaigns"]
-          }
+          responseMimeType: "application/json"
         }
       };
 
       let data = null;
-      let success = false;
-      let lastError = null;
-      const delays = [1000, 2000, 4000, 8000, 16000];
+      let lastErrorText = "";
       
-      // Clevere Warteschleife direkt hier, damit Canvas den "fetch" Call sauber sieht
-      for (let i = 0; i <= 5; i++) {
-        try {
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
-            { 
-              method: 'POST', 
-              headers: { 'Content-Type': 'application/json' }, 
-              body: JSON.stringify(payload) 
-            }
-          );
-
-          if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`HTTP Error ${response.status}: ${errText}`);
-          }
-
-          data = await response.json();
-          success = true;
-          break;
-        } catch (err) {
-          lastError = err;
-          if (i < 5) await new Promise(resolve => setTimeout(resolve, delays[i]));
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${finalApiKey}`,
+        { 
+          method: 'POST', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify(payload) 
         }
+      );
+
+      if (!response.ok) {
+        lastErrorText = await response.text();
+        throw new Error(`Google API Fehler (${response.status}): ${lastErrorText}`);
       }
 
-      if (!success) {
-        throw lastError;
-      }
+      data = await response.json();
 
-      let rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+      let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+      rawText = rawText.replace(/```json/ig, '').replace(/```/g, '').trim();
+      
       let result = {};
       try {
         result = JSON.parse(rawText);
       } catch(e) {
-        console.error("JSON Parse Error:", rawText);
-        throw new Error("Die KI hat eine ungültige Antwort geliefert.");
+        throw new Error("Die KI hat keine gültigen Daten geliefert.");
       }
       
       if (result.newCampaigns && Array.isArray(result.newCampaigns)) {
@@ -538,11 +516,7 @@ REGELN:
 
     } catch (error) {
       console.error("AI Assistant Error Details:", error);
-      if (error.message === "API_KEY_MISSING") {
-         setChatHistory(prev => [...prev, { role: 'error', text: `Achtung auf Vercel: Bitte hinterlege in den Vercel "Project Settings" unter "Environment Variables" deinen Gemini API-Key als REACT_APP_GEMINI_API_KEY.` }]);
-      } else {
-         setChatHistory(prev => [...prev, { role: 'error', text: `Ein Verbindungsfehler ist aufgetreten. Überprüfe deinen API-Key auf Vercel.` }]);
-      }
+      setChatHistory(prev => [...prev, { role: 'error', text: `Fehler: ${error.message}` }]);
     } finally {
       setIsAiLoading(false);
     }
@@ -704,7 +678,6 @@ REGELN:
   const handlePrintPDF = () => {
     setIsPdfGenerating(true); 
     
-    // Wir warten großzügig, bis React wirklich JEDES <input> Feld in ein <div> umgewandelt hat
     setTimeout(() => {
       try {
         window.print();
@@ -715,7 +688,7 @@ REGELN:
       } finally {
         setIsPdfGenerating(false); 
       }
-    }, 500); // 500 Millisekunden reichen völlig aus
+    }, 500); 
   };
 
   const totalColumns = 8 + generatedMonths.length;
@@ -1276,7 +1249,27 @@ REGELN:
                       <div className="bg-blue-100 p-1.5 rounded-lg"><Sparkles size={16} className="text-blue-600" /></div>
                       <h2 className="font-black uppercase tracking-wider text-xs text-black">Briefing Assistent</h2>
                     </div>
+                    <button onClick={() => setIsAiSettingsOpen(!isAiSettingsOpen)} className={`p-1.5 rounded-md transition-colors ${isAiSettingsOpen ? 'bg-gray-200 text-black' : 'text-gray-400 hover:text-black hover:bg-gray-100'}`} title="API Einstellungen">
+                      <Settings size={16} />
+                    </button>
                   </div>
+
+                  {isAiSettingsOpen && (
+                    <div className="p-4 bg-white border-b border-gray-200 text-xs">
+                      <label className="font-black text-gray-700 block mb-1.5 uppercase tracking-wider">Eigener API-Key</label>
+                      <input
+                         type="password"
+                         value={customApiKey}
+                         onChange={(e) => {
+                           setCustomApiKey(e.target.value);
+                           localStorage.setItem('gemini_api_key', e.target.value);
+                         }}
+                         placeholder="Z.B. AIzaSy..."
+                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-black outline-none font-mono text-[10px]"
+                      />
+                      <p className="text-[10px] text-gray-500 mt-2 font-medium">Wird lokal in deinem Browser gespeichert. Bleibt leer für Standard Vercel Keys.</p>
+                    </div>
+                  )}
 
                   <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white">
                     {chatHistory.length === 0 ? (
@@ -1307,7 +1300,7 @@ REGELN:
                         <div className="text-[9px] font-black uppercase mb-1 text-black">Assistent</div>
                         <div className="bg-gray-50 border border-gray-100 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3.5 flex gap-1.5 items-center">
                           <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></div>
-                          <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                          <div className="w-1.5 h-1.5 bg-gray-400 animate-bounce" style={{animationDelay: '0.2s'}}></div>
                           <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.4s'}}></div>
                         </div>
                       </div>
