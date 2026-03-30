@@ -428,7 +428,7 @@ export default function App() {
     setTargetBudget(parseInt(val, 10) || 0);
   };
 
-  // --- FINALE KI-LOGIK FÜR VERCEL ---
+  // --- FINALE KI-LOGIK FÜR VERCEL & CANVAS ---
   const handleAiSubmit = async () => {
     if (!chatInput.trim()) return;
     setIsAiLoading(true);
@@ -437,19 +437,24 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
-      // 1. Hole den API-Key auf dem sichersten, kompatibelsten Weg
+      // Erkennung, ob wir im Canvas oder auf Vercel sind (Canvas injiziert __app_id)
+      const isCanvasEnvironment = typeof __app_id !== 'undefined';
+      
+      // Nutze das Modell "gemini-2.5-pro", es sei denn, wir sind in der Vorschau, dann MUSS das interne Preview-Modell ran.
+      const modelName = isCanvasEnvironment ? 'gemini-2.5-flash-preview-09-2025' : 'gemini-2.5-pro';
+      
       let finalApiKey = customApiKey.trim();
       
       try {
-        if (process.env.REACT_APP_GEMINI_API_KEY) {
-          finalApiKey = process.env.REACT_APP_GEMINI_API_KEY;
+        if (typeof process !== 'undefined' && process.env) {
+          finalApiKey = finalApiKey || process.env.REACT_APP_GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
         }
       } catch(e) {
-        // Wird ignoriert, wenn process.env nicht existiert
+        // Ignorieren falls process.env nicht verfugbar
       }
 
-      if (!finalApiKey) {
-         throw new Error("Bitte hinterlege deinen API Key in den Vercel Environment Variables (REACT_APP_GEMINI_API_KEY) oder trage ihn rechts im ⚙️-Menü ein.");
+      if (!isCanvasEnvironment && !finalApiKey) {
+         throw new Error("Fehlender API-Key! Da die App auf Vercel läuft, wird ein API Key benötigt. Bitte setze REACT_APP_GEMINI_API_KEY in Vercel oder trage ihn hier im ⚙️-Menü ein.");
       }
 
       const systemPrompt = `Du bist der KI-Planungsassistent für den "Media Budget Planner".
@@ -480,7 +485,7 @@ REGELN:
       let lastErrorText = "";
       
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${finalApiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${finalApiKey}`,
         { 
           method: 'POST', 
           headers: { 'Content-Type': 'application/json' }, 
@@ -1264,10 +1269,10 @@ REGELN:
                            setCustomApiKey(e.target.value);
                            localStorage.setItem('gemini_api_key', e.target.value);
                          }}
-                         placeholder="Z.B. AIzaSy..."
+                         placeholder="Im Canvas leer lassen..."
                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-black outline-none font-mono text-[10px]"
                       />
-                      <p className="text-[10px] text-gray-500 mt-2 font-medium">Wird lokal in deinem Browser gespeichert. Bleibt leer für Standard Vercel Keys.</p>
+                      <p className="text-[10px] text-gray-500 mt-2 font-medium">Nur auf Vercel nötig. Wird lokal in deinem Browser gespeichert.</p>
                     </div>
                   )}
 
