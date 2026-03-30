@@ -431,7 +431,13 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
 
     try {
+      // Exakt die Version, die wir zuvor erfolgreich genutzt haben
       const apiKey = process.env.REACT_APP_GEMINI_API_KEY; 
+
+      if (!apiKey) {
+         throw new Error("API_KEY_MISSING");
+      }
+
       const systemPrompt = `Du bist der KI-Planungsassistent für den "Media Budget Planner".
 Deine Aufgabe ist es, die Text-Anweisungen des Users in aktualisierte Kampagnendaten zu übersetzen.
 WICHTIGER KONTEXT:
@@ -532,7 +538,11 @@ REGELN:
 
     } catch (error) {
       console.error("AI Assistant Error Details:", error);
-      setChatHistory(prev => [...prev, { role: 'error', text: `Ein Verbindungsfehler ist aufgetreten. (Stelle sicher, dass du in der Vorschau-Umgebung bist, oder einen eigenen API-Key bei Vercel hinterlegt hast).` }]);
+      if (error.message === "API_KEY_MISSING") {
+         setChatHistory(prev => [...prev, { role: 'error', text: `Achtung auf Vercel: Bitte hinterlege in den Vercel "Project Settings" unter "Environment Variables" deinen Gemini API-Key als REACT_APP_GEMINI_API_KEY.` }]);
+      } else {
+         setChatHistory(prev => [...prev, { role: 'error', text: `Ein Verbindungsfehler ist aufgetreten. Überprüfe deinen API-Key auf Vercel.` }]);
+      }
     } finally {
       setIsAiLoading(false);
     }
